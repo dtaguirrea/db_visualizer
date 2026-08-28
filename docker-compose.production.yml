@@ -1,0 +1,27 @@
+services:
+  app:
+    environment:
+      AUTH_COOKIE_SECURE: "true"
+
+  caddy:
+    image: caddy:2.11-alpine
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?Set APP_DOMAIN in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - db_visualizer_network
+
+volumes:
+  caddy_data:
+  caddy_config:

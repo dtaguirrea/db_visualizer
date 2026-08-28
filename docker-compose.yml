@@ -1,0 +1,72 @@
+name: db_visualizer
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-db_visualizer}
+      POSTGRES_USER: ${POSTGRES_USER:-db_visualizer}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-db_visualizer} -d ${POSTGRES_DB:-db_visualizer}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+    networks:
+      - db_visualizer_network
+
+  ocr_service:
+    image: ghcr.io/huridocs/pdf-document-layout-analysis:v0.0.35
+    entrypoint: ["./start.sh"]
+    restart: unless-stopped
+    networks:
+      - db_visualizer_network
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:${APP_PORT:-8501}:8501"
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-db_visualizer}
+      DB_USER: ${POSTGRES_USER:-db_visualizer}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      UPLOAD_DIR: /app/uploaded_files
+      OCR_SERVICE_URL: http://ocr_service:5060
+      OCR_LANGUAGE: ${OCR_LANGUAGE:-es}
+      OCR_TIMEOUT_SECONDS: ${OCR_TIMEOUT_SECONDS:-600}
+      OCR_USE_FAST_MODE: ${OCR_USE_FAST_MODE:-false}
+      OCR_ROTATE_PAGES: ${OCR_ROTATE_PAGES:-true}
+      OCR_DESKEW: ${OCR_DESKEW:-true}
+      BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-admin}
+      BOOTSTRAP_ADMIN_FULL_NAME: ${BOOTSTRAP_ADMIN_FULL_NAME:-Administrador}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?Set BOOTSTRAP_ADMIN_PASSWORD in .env}
+      AUTH_COOKIE_NAME: ${AUTH_COOKIE_NAME:-db_visualizer_session}
+      AUTH_SESSION_DAYS: ${AUTH_SESSION_DAYS:-7}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
+      SEARCH_RESULT_LIMIT: ${SEARCH_RESULT_LIMIT:-100}
+    volumes:
+      - uploaded_files:/app/uploaded_files
+    depends_on:
+      db:
+        condition: service_healthy
+      ocr_service:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - db_visualizer_network
+
+volumes:
+  postgres_data:
+  uploaded_files:
+
+networks:
+  db_visualizer_network:
+    driver: bridge
