@@ -8,6 +8,7 @@ from sqlalchemy import text
 
 from src.database import get_connection
 from src.documents import (
+    document_display_label,
     document_text_snippets,
     get_ocr_pdf_path,
     get_visible_pdf_path,
@@ -35,7 +36,7 @@ if document_id is None:
 
 with get_connection() as conn:
     row = conn.execute(text('''
-        SELECT document_id, source_reference, original_format, ocr_status, ocr_error,
+        SELECT document_id, title, source_reference, document_date, original_format, ocr_status, ocr_error,
                original_file_path, ocr_file_path, file_path, ocr_text,
                created_by, created_at, updated_by, updated_at
         FROM document_records
@@ -47,11 +48,18 @@ if document is None:
     st.error("El documento solicitado no existe.")
     st.stop()
 
-st.subheader(f"{document['document_id']} · {document['source_reference']}")
-st.caption(
-    f"{document['original_format'] or 'Formato no indicado'} · "
-    f"OCR: {document['ocr_status']} · Cargado por {document['created_by']}"
-)
+st.subheader(document_display_label(document))
+metadata_parts = []
+if document.get("source_reference"):
+    metadata_parts.append(f"Origen: {document['source_reference']}")
+if document.get("document_date"):
+    metadata_parts.append(f"Fecha: {document['document_date']}")
+metadata_parts.extend([
+    document.get("original_format") or "Formato no indicado",
+    f"OCR: {document['ocr_status']}",
+    f"Cargado por {document['created_by']}",
+])
+st.caption(" · ".join(metadata_parts))
 
 pdf_path = get_visible_pdf_path(document)
 if not pdf_path or not Path(pdf_path).is_file():
@@ -68,7 +76,7 @@ with col_download:
                 "Descargar PDF con OCR",
                 data=pdf_file,
                 file_name=safe_pdf_filename(
-                    document["document_id"], document["source_reference"], ocr=True
+                    document["document_id"], document.get("title") or document.get("source_reference"), ocr=True
                 ),
                 mime="application/pdf",
                 type="primary",
@@ -92,7 +100,7 @@ with col_original:
                 "Descargar original",
                 data=original_file,
                 file_name=safe_pdf_filename(
-                    document["document_id"], document["source_reference"], ocr=False
+                    document["document_id"], document.get("title") or document.get("source_reference"), ocr=False
                 ),
                 mime="application/pdf",
                 use_container_width=True,

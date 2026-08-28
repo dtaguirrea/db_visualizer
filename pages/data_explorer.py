@@ -47,7 +47,10 @@ with get_connection() as conn:
         st.caption(descriptions[selected_table])
 
     pk_column = get_primary_key_column(conn, selected_table)
-    original_df = pd.read_sql_query(text(f"SELECT * FROM {selected_table} ORDER BY {pk_column}"), conn)
+    quote = conn.dialect.identifier_preparer.quote
+    original_df = pd.read_sql_query(
+        text(f"SELECT * FROM {quote(selected_table)} ORDER BY {quote(pk_column)}"), conn
+    )
     requested_record_id = (st.query_params.get("record_id") or pending_record_id) if requested_table == selected_table else None
     if requested_record_id and not original_df.empty:
         pk_text = original_df[pk_column].map(lambda value: str(value).removesuffix(".0"))

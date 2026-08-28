@@ -9,8 +9,8 @@ from sqlalchemy import text
 import config
 from src.audit import log_action
 from src.database import get_connection, utc_now
+from src.documents import document_display_label, safe_pdf_filename
 from src.ocr_client import OcrServiceError, create_searchable_pdf, extract_text_from_pdf
-from src.documents import safe_pdf_filename
 from src.table_relations import document_viewer_url
 
 if not st.session_state.get("logged_in"):
@@ -21,7 +21,6 @@ st.caption("Carga de PDF y generación automática de una copia buscable con OCR
 
 
 def _run_ocr(original_path: str, ocr_path: str) -> tuple[str | None, str, str, str | None]:
-    """Procesa el PDF preservando el OCR aunque falle la indexación de texto."""
     searchable_pdf = create_searchable_pdf(original_path, ocr_path)
     try:
         indexed_text = extract_text_from_pdf(searchable_pdf)
@@ -31,21 +30,32 @@ def _run_ocr(original_path: str, ocr_path: str) -> tuple[str | None, str, str, s
 
 
 with st.form("document_upload_form", clear_on_submit=True):
-    col1, col2 = st.columns([2, 1])
+    title = st.text_input("Título o nombre", placeholder="Opcional")
+    col1, col2 = st.columns(2)
     with col1:
-        source_reference = st.text_input("Origen o referencia")
-        uploaded_pdf = st.file_uploader("Archivo PDF", type=["pdf"])
+        source_reference = st.text_input("Origen o procedencia", placeholder="Opcional")
     with col2:
+        document_date = st.date_input("Fecha del documento", value=None, format="YYYY-MM-DD")
+
+    col3, col4 = st.columns([1, 2])
+    with col3:
         original_format = st.selectbox(
             "Formato de origen",
             ["PDF digitalizado", "PDF nativo", "Microfilm digitalizado", "Escaneo de baja calidad"],
         )
+    with col4:
+        uploaded_pdf = st.file_uploader("Archivo PDF", type=["pdf"])
+
     submitted = st.form_submit_button("Cargar y procesar", type="primary")
 
 if submitted:
-    if not source_reference.strip() or uploaded_pdf is None:
-        st.error("Ingresa una referencia y selecciona un PDF.")
+    if uploaded_pdf is None:
+        st.error("Selecciona un archivo PDF.")
     else:
+        title_value = title.strip() or None
+        source_value = source_reference.strip() or None
+        date_value = document_date.isoformat() if document_date else None
+
         token = uuid4().hex
         original_path = config.UPLOAD_DIR / f"{token}_original.pdf"
         ocr_path = config.UPLOAD_DIR / f"{token}_ocr.pdf"
@@ -84,16 +94,18 @@ if submitted:
                 now = utc_now()
                 result = conn.execute(text('''
                     INSERT INTO document_records (
-                        source_reference, original_format, file_path, original_file_path,
-                        ocr_file_path, ocr_text, ocr_status, ocr_error,
-                        created_by, created_at, updated_by, updated_at
+                        title, source_reference, document_date, original_format,
+                        file_path, original_file_path, ocr_file_path, ocr_text,
+                        ocr_status, ocr_error, created_by, created_at, updated_by, updated_at
                     ) VALUES (
-                        :source_reference, :original_format, :file_path, :original_file_path,
-                        :ocr_file_path, :ocr_text, :ocr_status, :ocr_error,
-                        :created_by, :created_at, :updated_by, :updated_at
+                        :title, :source_reference, :document_date, :original_format,
+                        :file_path, :original_file_path, :ocr_file_path, :ocr_text,
+                        :ocr_status, :ocr_error, :created_by, :created_at, :updated_by, :updated_at
                     ) RETURNING document_id
                 '''), {
-                    "source_reference": source_reference.strip(),
+                    "title": title_value,
+                    "source_reference": source_value,
+                    "document_date": date_value,
                     "original_format": original_format,
                     "file_path": visible_path,
                     "original_file_path": str(original_path),
@@ -107,16 +119,23 @@ if submitted:
                     "updated_at": now,
                 })
                 document_id = result.scalar_one()
-                log_action(conn, "document_records", document_id, "INSERT", st.session_state.username,
-                           details={"ocr_status": ocr_status})
+                log_action(
+                    conn,
+                    "document_records",
+                    document_id,
+                    "INSERT",
+                    st.session_state.username,
+                    details={"ocr_status": ocr_status, "title": title_value},
+                )
                 conn.commit()
                 st.success(f"Documento {document_id} guardado.")
                 if ocr_file_path:
+                    filename_label = title_value or source_value
                     with open(ocr_file_path, "rb") as pdf_file:
                         st.download_button(
                             "Descargar PDF con OCR",
                             data=pdf_file,
-                            file_name=safe_pdf_filename(document_id, source_reference, ocr=True),
+                            file_name=safe_pdf_filename(document_id, filename_label, ocr=True),
                             mime="application/pdf",
                             type="primary",
                             key=f"upload_download_ocr_{document_id}",
@@ -136,8 +155,9 @@ st.divider()
 st.subheader("Documentos cargados")
 with get_connection() as conn:
     documents = pd.read_sql_query(text('''
-        SELECT document_id, source_reference, original_format, ocr_status, ocr_error,
-               original_file_path, ocr_file_path, created_by, created_at
+        SELECT document_id, title, source_reference, document_date, original_format,
+               ocr_status, ocr_error, original_file_path, ocr_file_path,
+               created_by, created_at
         FROM document_records
         ORDER BY document_id DESC
     '''), conn)
@@ -145,8 +165,14 @@ with get_connection() as conn:
 if documents.empty:
     st.info("No hay documentos cargados.")
 else:
-    display = documents[["document_id", "source_reference", "original_format", "ocr_status", "created_by", "created_at"]].copy()
-    display["Abrir"] = display["document_id"].map(document_viewer_url)
+    display = documents[[
+        "document_id", "title", "source_reference", "document_date",
+        "original_format", "ocr_status", "created_by", "created_at"
+    ]].copy()
+    display.columns = [
+        "ID", "Título", "Origen", "Fecha", "Formato", "OCR", "Creado por", "Creado el"
+    ]
+    display["Abrir"] = documents["document_id"].map(document_viewer_url)
     st.dataframe(
         display,
         use_container_width=True,
@@ -158,10 +184,10 @@ else:
 
     retry_candidates = documents[documents["ocr_status"] != "completado"]
     if not retry_candidates.empty:
-        labels = {
-            f"{int(row.document_id)} · {row.source_reference}": int(row.document_id)
-            for row in retry_candidates.itertuples()
-        }
+        labels = {}
+        for row in retry_candidates.to_dict("records"):
+            labels[document_display_label(row)] = int(row["document_id"])
+
         with st.expander("Reprocesar OCR"):
             selected = st.selectbox("Documento", list(labels.keys()))
             if st.button("Reprocesar", type="primary"):

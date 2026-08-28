@@ -2,13 +2,13 @@
 
 **db_visualizer** es una plataforma colaborativa para gestión documental y estructuración de datos. Permite trabajar con documentos PDF, aplicar OCR, consultar el texto reconocido, organizar información en tablas relacionales y mantener trazabilidad sobre las modificaciones realizadas por los usuarios.
 
-**Versión actual:** `1.0.0`
+**Versión estable actual:** `1.1.0`
 
 La interfaz de usuario está en español. Los identificadores del código y la configuración técnica utilizan nombres en inglés cuando corresponde.
 
 ## Funcionalidades principales
 
-- Carga y administración de documentos PDF.
+- Carga y administración de documentos PDF con título, procedencia y fecha opcionales.
 - Generación de PDFs buscables mediante OCR con [HURIDOCS PDF Document Layout Analysis](https://github.com/huridocs/pdf-document-layout-analysis).
 - Visualización, búsqueda y descarga del PDF procesado con OCR.
 - Conservación separada del documento original y de su copia OCR.
@@ -16,7 +16,7 @@ La interfaz de usuario está en español. Los identificadores del código y la c
 - Creación de tablas personalizadas desde la interfaz.
 - Edición colaborativa de registros mediante PostgreSQL.
 - Llaves foráneas entre tablas personalizadas.
-- Llaves foráneas hacia documentos mediante un selector desplegable.
+- Llaves foráneas hacia documentos mediante un selector desplegable con título, procedencia y fecha.
 - Apertura directa del documento asociado desde una tabla.
 - Búsqueda global sobre texto OCR, extracciones y tablas creadas por los usuarios.
 - Detección de conflictos cuando dos usuarios intentan modificar simultáneamente un mismo registro.
@@ -132,6 +132,31 @@ http://localhost:8501
 
 Inicia sesión con el administrador configurado en `.env` y cambia la contraseña inicial cuando la aplicación lo solicite.
 
+
+### Reutilizar una imagen OCR ya descargada
+
+Si el equipo ya tiene localmente una imagen funcional de HURIDOCS y no se desea descargar otra, se puede indicar explícitamente en `.env`. Por ejemplo:
+
+```env
+OCR_IMAGE=ghcr.io/huridocs/pdf-document-layout-analysis:latest
+OCR_PULL_POLICY=never
+```
+
+Con `OCR_PULL_POLICY=never`, Docker utiliza exclusivamente la imagen almacenada en el equipo y falla si esa imagen no existe localmente. Esto es útil en conexiones limitadas; para instalaciones nuevas se recomienda `missing`.
+
+## Actualización desde 1.0.x
+
+La actualización a `1.1.0` conserva los volúmenes existentes. No es necesario recrear PostgreSQL ni volver a cargar los documentos.
+
+```bash
+git pull
+docker compose up --build -d
+```
+
+Al iniciar, la aplicación agrega los nuevos metadatos documentales y reconcilia automáticamente los metadatos de tablas dinámicas afectados por diferencias de mayúsculas/minúsculas. Esta migración no elimina las filas de las tablas creadas por los usuarios.
+
+No utilices `docker compose down -v` durante una actualización, ya que `-v` elimina deliberadamente los volúmenes persistentes.
+
 ## Trabajo colaborativo en una red local
 
 Por seguridad, la configuración predeterminada publica la aplicación únicamente en `127.0.0.1`.
@@ -198,6 +223,8 @@ En un despliegue público no expongas directamente PostgreSQL ni el API de HURID
 | `AUTH_COOKIE_SECURE` | `false` | Requiere HTTPS para la cookie; producción lo fuerza a `true` |
 | `MIN_PASSWORD_LENGTH` | `12` | Largo mínimo permitido para contraseñas |
 | `SEARCH_RESULT_LIMIT` | `100` | Límite de resultados por categoría de búsqueda |
+| `OCR_IMAGE` | `huridocs/pdf-document-layout-analysis:v0.0.35` | Imagen del servicio OCR |
+| `OCR_PULL_POLICY` | `missing` | Política de descarga de la imagen OCR (`missing` o `never`) |
 | `OCR_LANGUAGE` | `es` | Idioma enviado al servicio OCR |
 | `OCR_TIMEOUT_SECONDS` | `600` | Tiempo máximo de una solicitud OCR |
 | `OCR_USE_FAST_MODE` | `false` | Habilita el modo rápido de HURIDOCS cuando aplica |
@@ -358,7 +385,7 @@ db_visualizer/
 
 ## Flujo de trabajo con Git y GitHub
 
-El nombre oficial del proyecto es **`db_visualizer`**. La primera versión estable del repositorio es **`v1.0.0`**. Las denominaciones internas anteriores utilizadas durante el prototipado no forman parte del versionado oficial.
+El nombre oficial del proyecto es **`db_visualizer`**. La primera versión estable del repositorio es **`v1.0.1`**. Las denominaciones internas anteriores utilizadas durante el prototipado no forman parte del versionado oficial.
 
 Modelo de ramas recomendado:
 
@@ -399,8 +426,8 @@ git push -u origin main
 Después crea el tag del primer release oficial:
 
 ```bash
-git tag -a v1.0.0 -m "db_visualizer 1.0.0"
-git push origin v1.0.0
+git tag -a v1.0.1 -m "db_visualizer 1.0.0"
+git push origin v1.0.1
 ```
 
 En GitHub puedes crear un **Release** a partir de ese tag y utilizar el contenido de `CHANGELOG.md` como notas de la versión.
@@ -436,7 +463,7 @@ Consulta [SECURITY.md](SECURITY.md) antes de publicar la aplicación en Internet
 
 ## Dependencia OCR
 
-`db_visualizer` utiliza HURIDOCS `pdf-document-layout-analysis` para realizar OCR. La configuración Docker fija la imagen en `v0.0.35`, en lugar de utilizar `latest`, para evitar cambios inesperados de comportamiento provocados por actualizaciones automáticas de la dependencia.
+`db_visualizer` utiliza HURIDOCS `pdf-document-layout-analysis` para realizar OCR. La configuración Docker fija la imagen de Docker Hub `huridocs/pdf-document-layout-analysis:v0.0.35`, en lugar de utilizar `latest`, para evitar cambios inesperados de comportamiento provocados por actualizaciones automáticas de la dependencia.
 
 Proyecto original:
 

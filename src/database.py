@@ -1,4 +1,5 @@
 """Acceso a datos de db_visualizer con PostgreSQL y SQLite para pruebas locales."""
+from collections import defaultdict
 from datetime import datetime, timezone
 from functools import lru_cache
 
@@ -44,8 +45,11 @@ def _pk_sql(name: str) -> str:
 
 
 def _add_document_columns_if_needed(conn: Connection) -> None:
+    """Migra document_records sin eliminar datos de instalaciones anteriores."""
     columns = {c["name"] for c in inspect(conn).get_columns("document_records")}
     additions = {
+        "title": "TEXT",
+        "document_date": "TEXT",
         "original_file_path": "TEXT",
         "ocr_file_path": "TEXT",
         "ocr_error": "TEXT",
@@ -53,6 +57,14 @@ def _add_document_columns_if_needed(conn: Connection) -> None:
     for column_name, column_type in additions.items():
         if column_name not in columns:
             conn.execute(text(f"ALTER TABLE document_records ADD COLUMN {column_name} {column_type}"))
+
+    # source_reference fue obligatorio en las primeras versiones. Desde 1.1.0
+    # la procedencia es un metadato opcional, al igual que el título y la fecha.
+    if is_postgres(conn):
+        conn.execute(text(
+            "ALTER TABLE document_records ALTER COLUMN source_reference DROP NOT NULL"
+        ))
+
     conn.execute(text("""
         UPDATE document_records
         SET original_file_path = file_path
@@ -60,53 +72,115 @@ def _add_document_columns_if_needed(conn: Connection) -> None:
     """))
 
 
-def _backfill_dynamic_column_registry(conn: Connection) -> None:
-    """Registra metadatos mínimos para tablas creadas en versiones anteriores."""
+def _infer_column_type(column: dict, referred_table: str | None, candidates: list[dict]) -> str:
+    if referred_table == "document_records":
+        return "Documento"
+    if referred_table:
+        return "Llave foránea"
+
+    # Conserva el tipo funcional registrado anteriormente (por ejemplo Fecha),
+    # aunque PostgreSQL haya convertido el nombre de la columna a minúsculas.
+    for candidate in sorted(candidates, key=lambda row: row.get("ordinal_position", 0)):
+        candidate_type = candidate.get("column_type")
+        if candidate_type and candidate_type not in {"Documento", "Llave foránea"}:
+            return candidate_type
+
+    sql_type = str(column["type"]).upper()
+    if "INT" in sql_type:
+        return "Número entero"
+    if any(token in sql_type for token in ("DOUBLE", "FLOAT", "REAL", "NUMERIC", "DECIMAL")):
+        return "Número decimal"
+    if "DATE" in sql_type:
+        return "Fecha"
+    return "Texto"
+
+
+def _reconcile_dynamic_column_registry(conn: Connection) -> None:
+    """Repara metadatos de tablas dinámicas usando el esquema físico como fuente de verdad.
+
+    Versiones anteriores podían registrar ``Nombre`` mientras PostgreSQL creaba físicamente
+    ``nombre``. En el siguiente inicio el backfill añadía también ``nombre`` y la interfaz
+    terminaba intentando insertar ambas columnas. Esta migración agrupa nombres sin distinguir
+    mayúsculas/minúsculas y reconstruye un único registro canónico por columna, sin tocar las
+    filas de las tablas de usuario.
+    """
     inspector = inspect(conn)
-    registered_tables = {
-        row[0] for row in conn.execute(text("SELECT table_name FROM dynamic_tables_registry")).all()
-    }
-    for table_name in registered_tables:
-        if table_name not in inspector.get_table_names():
-            continue
-        existing = {
-            row[0] for row in conn.execute(text(
-                "SELECT column_name FROM dynamic_table_columns WHERE table_name = :table_name"
-            ), {"table_name": table_name}).all()
-        }
-        foreign_keys = get_foreign_keys(conn, table_name)
-        pk = get_primary_key_column(conn, table_name)
+    physical_tables = inspector.get_table_names()
+    physical_lookup = {name.casefold(): name for name in physical_tables}
+    registry_rows = conn.execute(text(
+        "SELECT table_name, description, created_by, created_at FROM dynamic_tables_registry"
+    )).mappings().all()
+
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for row in registry_rows:
+        actual_name = physical_lookup.get(row["table_name"].casefold())
+        if actual_name:
+            grouped[actual_name].append(dict(row))
+
+    for actual_table, registry_group in grouped.items():
+        registry_names = {row["table_name"] for row in registry_group}
+        metadata_rows: list[dict] = []
+        for registry_name in registry_names:
+            rows = conn.execute(text("""
+                SELECT table_name, column_name, column_type, ordinal_position, foreign_key_table
+                FROM dynamic_table_columns
+                WHERE table_name = :table_name
+            """), {"table_name": registry_name}).mappings().all()
+            metadata_rows.extend(dict(row) for row in rows)
+
+        # Asegura que el registry use exactamente el nombre físico de la tabla.
+        canonical_registry = next(
+            (row for row in registry_group if row["table_name"] == actual_table),
+            registry_group[0],
+        )
+        conn.execute(text("""
+            INSERT INTO dynamic_tables_registry (table_name, description, created_by, created_at)
+            VALUES (:table_name, :description, :created_by, :created_at)
+            ON CONFLICT (table_name) DO NOTHING
+        """), {
+            "table_name": actual_table,
+            "description": canonical_registry.get("description"),
+            "created_by": canonical_registry.get("created_by") or "system",
+            "created_at": canonical_registry.get("created_at") or utc_now(),
+        })
+
+        for registry_name in registry_names | {actual_table}:
+            conn.execute(text(
+                "DELETE FROM dynamic_table_columns WHERE table_name = :table_name"
+            ), {"table_name": registry_name})
+
+        for registry_name in registry_names:
+            if registry_name != actual_table:
+                conn.execute(text(
+                    "DELETE FROM dynamic_tables_registry WHERE table_name = :table_name"
+                ), {"table_name": registry_name})
+
+        foreign_keys = get_foreign_keys(conn, actual_table)
+        pk = get_primary_key_column(conn, actual_table)
+        audit_columns = {"created_by", "created_at", "updated_by", "updated_at"}
+
         ordinal = 0
-        for column in inspector.get_columns(table_name):
-            name = column["name"]
-            if name == pk or name in {"created_by", "created_at", "updated_by", "updated_at"}:
+        for column in inspector.get_columns(actual_table):
+            physical_name = column["name"]
+            if physical_name == pk or physical_name in audit_columns:
                 continue
-            if name in existing:
-                ordinal += 1
-                continue
-            referred_table = foreign_keys.get(name)
-            if referred_table == "document_records":
-                column_type = "Documento"
-            elif referred_table:
-                column_type = "Llave foránea"
-            else:
-                sql_type = str(column["type"]).upper()
-                if "INT" in sql_type:
-                    column_type = "Número entero"
-                elif any(token in sql_type for token in ("DOUBLE", "FLOAT", "REAL", "NUMERIC", "DECIMAL")):
-                    column_type = "Número decimal"
-                else:
-                    column_type = "Texto"
+
+            candidates = [
+                row for row in metadata_rows
+                if str(row.get("column_name", "")).casefold() == physical_name.casefold()
+            ]
+            referred_table = foreign_keys.get(physical_name)
+            column_type = _infer_column_type(column, referred_table, candidates)
+
             conn.execute(text("""
                 INSERT INTO dynamic_table_columns (
                     table_name, column_name, column_type, ordinal_position, foreign_key_table
                 ) VALUES (
                     :table_name, :column_name, :column_type, :ordinal_position, :foreign_key_table
                 )
-                ON CONFLICT (table_name, column_name) DO NOTHING
             """), {
-                "table_name": table_name,
-                "column_name": name,
+                "table_name": actual_table,
+                "column_name": physical_name,
                 "column_type": column_type,
                 "ordinal_position": ordinal,
                 "foreign_key_table": referred_table,
@@ -140,7 +214,9 @@ def init_db() -> None:
 
         conn.execute(text(f'''CREATE TABLE IF NOT EXISTS document_records (
             {_pk_sql("document_id")},
-            source_reference TEXT NOT NULL,
+            title TEXT,
+            source_reference TEXT,
+            document_date TEXT,
             original_format TEXT,
             file_path TEXT,
             original_file_path TEXT,
@@ -197,13 +273,27 @@ def init_db() -> None:
             details TEXT
         )'''))
 
-        _backfill_dynamic_column_registry(conn)
+        _reconcile_dynamic_column_registry(conn)
 
         if is_postgres(conn):
             conn.execute(text('''
                 CREATE INDEX IF NOT EXISTS idx_document_records_ocr_fts
                 ON document_records
                 USING GIN (to_tsvector('spanish', COALESCE(ocr_text, '')))
+            '''))
+            conn.execute(text('''
+                CREATE INDEX IF NOT EXISTS idx_document_records_search_fts
+                ON document_records
+                USING GIN (
+                    to_tsvector(
+                        'spanish',
+                        COALESCE(title, '') || ' ' ||
+                        COALESCE(source_reference, '') || ' ' ||
+                        COALESCE(document_date, '') || ' ' ||
+                        COALESCE(original_format, '') || ' ' ||
+                        COALESCE(ocr_text, '')
+                    )
+                )
             '''))
         else:
             conn.execute(text('''CREATE VIRTUAL TABLE IF NOT EXISTS document_records_fts USING fts5(
@@ -223,8 +313,6 @@ def init_db() -> None:
                 AFTER DELETE ON document_records BEGIN
                     DELETE FROM document_records_fts WHERE document_id = old.document_id;
                 END;'''))
-            # La tabla FTS puede haberse creado después de documentos existentes.
-            # Se reconstruye al iniciar para que el buscador no omita registros anteriores.
             conn.execute(text("DELETE FROM document_records_fts"))
             conn.execute(text('''
                 INSERT INTO document_records_fts(document_id, ocr_text)

@@ -16,7 +16,6 @@ def _quote_identifier(conn: Connection, identifier: str) -> str:
 
 
 def _like_pattern(query: str) -> str:
-    # Escapa los comodines para que '%' y '_' se busquen como texto literal.
     escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     return f"%{escaped}%"
 
@@ -28,33 +27,42 @@ def search_documents(conn: Connection, query: str, limit: int | None = None) -> 
     limit = limit or config.SEARCH_RESULT_LIMIT
     params = {"query": query, "pattern": _like_pattern(query), "limit": limit}
 
+    common_select = '''
+        SELECT document_id, title, source_reference, document_date, original_format,
+               ocr_status, ocr_text, created_by, created_at
+        FROM document_records
+    '''
     if is_postgres(conn):
-        rows = conn.execute(text('''
-            SELECT document_id, source_reference, original_format, ocr_status,
-                   ocr_text, created_by, created_at
-            FROM document_records
+        rows = conn.execute(text(common_select + '''
             WHERE
                 to_tsvector(
                     'spanish',
+                    COALESCE(title, '') || ' ' ||
                     COALESCE(source_reference, '') || ' ' ||
+                    COALESCE(document_date, '') || ' ' ||
                     COALESCE(original_format, '') || ' ' ||
                     COALESCE(ocr_text, '')
                 ) @@ websearch_to_tsquery('spanish', :query)
+                OR LOWER(COALESCE(title, '')) LIKE LOWER(:pattern) ESCAPE '\\'
                 OR LOWER(COALESCE(source_reference, '')) LIKE LOWER(:pattern) ESCAPE '\\'
+                OR LOWER(COALESCE(document_date, '')) LIKE LOWER(:pattern) ESCAPE '\\'
                 OR LOWER(COALESCE(original_format, '')) LIKE LOWER(:pattern) ESCAPE '\\'
                 OR LOWER(COALESCE(ocr_text, '')) LIKE LOWER(:pattern) ESCAPE '\\'
             ORDER BY
-                CASE WHEN LOWER(COALESCE(source_reference, '')) LIKE LOWER(:pattern) ESCAPE '\\' THEN 0 ELSE 1 END,
+                CASE
+                    WHEN LOWER(COALESCE(title, '')) LIKE LOWER(:pattern) ESCAPE '\\' THEN 0
+                    WHEN LOWER(COALESCE(source_reference, '')) LIKE LOWER(:pattern) ESCAPE '\\' THEN 1
+                    ELSE 2
+                END,
                 document_id DESC
             LIMIT :limit
         '''), params).mappings().all()
     else:
-        rows = conn.execute(text('''
-            SELECT document_id, source_reference, original_format, ocr_status,
-                   ocr_text, created_by, created_at
-            FROM document_records
+        rows = conn.execute(text(common_select + '''
             WHERE
-                LOWER(COALESCE(source_reference, '')) LIKE LOWER(:pattern) ESCAPE '\\'
+                LOWER(COALESCE(title, '')) LIKE LOWER(:pattern) ESCAPE '\\'
+                OR LOWER(COALESCE(source_reference, '')) LIKE LOWER(:pattern) ESCAPE '\\'
+                OR LOWER(COALESCE(document_date, '')) LIKE LOWER(:pattern) ESCAPE '\\'
                 OR LOWER(COALESCE(original_format, '')) LIKE LOWER(:pattern) ESCAPE '\\'
                 OR LOWER(COALESCE(ocr_text, '')) LIKE LOWER(:pattern) ESCAPE '\\'
             ORDER BY document_id DESC
@@ -73,7 +81,7 @@ def search_extractions(conn: Connection, query: str, limit: int | None = None) -
     sql = f'''
         SELECT e.extraction_id, e.document_id, e.element_category, e.key_information,
                e.literal_quote, e.cross_reference_notes, e.review_status,
-               e.created_by, e.created_at, d.source_reference
+               e.created_by, e.created_at, d.title, d.source_reference, d.document_date
         FROM extraction_records e
         JOIN document_records d ON d.document_id = e.document_id
         WHERE
@@ -81,7 +89,9 @@ def search_extractions(conn: Connection, query: str, limit: int | None = None) -
             OR COALESCE(e.key_information, '') {operator} :pattern ESCAPE '\\'
             OR COALESCE(e.literal_quote, '') {operator} :pattern ESCAPE '\\'
             OR COALESCE(e.cross_reference_notes, '') {operator} :pattern ESCAPE '\\'
+            OR COALESCE(d.title, '') {operator} :pattern ESCAPE '\\'
             OR COALESCE(d.source_reference, '') {operator} :pattern ESCAPE '\\'
+            OR COALESCE(d.document_date, '') {operator} :pattern ESCAPE '\\'
         ORDER BY e.extraction_id DESC
         LIMIT :limit
     '''
@@ -90,7 +100,6 @@ def search_extractions(conn: Connection, query: str, limit: int | None = None) -
 
 
 def search_dynamic_tables(conn: Connection, query: str, limit: int | None = None) -> list[dict]:
-    """Busca texto visible en todas las tablas creadas por usuarios."""
     query = (query or "").strip()
     if not query:
         return []
@@ -106,10 +115,11 @@ def search_dynamic_tables(conn: Connection, query: str, limit: int | None = None
             continue
         pk_column = get_primary_key_column(conn, table_name)
         metadata = get_dynamic_column_metadata(conn, table_name)
-        searchable_columns = [
+        physical_names = {column["name"] for column in inspector.get_columns(table_name)}
+        searchable_columns = list(dict.fromkeys(
             item["column_name"] for item in metadata
-            if item["column_name"] not in AUDIT_COLUMNS
-        ]
+            if item["column_name"] not in AUDIT_COLUMNS and item["column_name"] in physical_names
+        ))
         if not searchable_columns:
             continue
 

@@ -22,7 +22,7 @@ class InvalidIdentifierError(ValueError):
 
 
 def validate_identifier(name: str, kind: str = "identificador") -> str:
-    candidate = (name or "").strip().replace(" ", "_")
+    candidate = (name or "").strip().replace(" ", "_").lower()
     if not _IDENTIFIER_PATTERN.match(candidate):
         raise InvalidIdentifierError(
             f"El {kind} '{name}' no es válido. Usa letras, números y guiones bajos, "
@@ -43,6 +43,7 @@ def create_dynamic_table(conn: Connection, table_name: str, columns: list,
     if not columns:
         raise ValueError("Define al menos una columna.")
 
+    quote = conn.dialect.identifier_preparer.quote
     primary_key = "record_id BIGSERIAL PRIMARY KEY" if is_postgres(conn) else "record_id INTEGER PRIMARY KEY AUTOINCREMENT"
     definitions = [primary_key]
     foreign_keys = []
@@ -66,12 +67,12 @@ def create_dynamic_table(conn: Connection, table_name: str, columns: list,
                 col for col in inspect(conn).get_columns(foreign_table) if col["name"] == referenced_pk
             )
             referenced_type = str(referenced_column["type"])
-            definitions.append(f"{column_name} {referenced_type}")
+            definitions.append(f"{quote(column_name)} {referenced_type}")
             foreign_keys.append(
-                f"FOREIGN KEY ({column_name}) REFERENCES {foreign_table}({referenced_pk}) ON DELETE SET NULL"
+                f"FOREIGN KEY ({quote(column_name)}) REFERENCES {quote(foreign_table)}({quote(referenced_pk)}) ON DELETE SET NULL"
             )
         else:
-            definitions.append(f"{column_name} {_TYPE_MAP.get(column_type, 'TEXT')}")
+            definitions.append(f"{quote(column_name)} {_TYPE_MAP.get(column_type, 'TEXT')}")
 
         normalized_columns.append({
             "name": column_name,
@@ -86,7 +87,7 @@ def create_dynamic_table(conn: Connection, table_name: str, columns: list,
         "updated_by TEXT",
         "updated_at TEXT",
     ])
-    ddl = f"CREATE TABLE {safe_table_name} (\n  " + ",\n  ".join(definitions + foreign_keys) + "\n)"
+    ddl = f"CREATE TABLE {quote(safe_table_name)} (\n  " + ",\n  ".join(definitions + foreign_keys) + "\n)"
     conn.execute(text(ddl))
     conn.execute(text('''
         INSERT INTO dynamic_tables_registry (table_name, description, created_by, created_at)
@@ -129,7 +130,8 @@ def drop_dynamic_table(conn: Connection, table_name: str, username: str) -> None
             "Elimina primero esas relaciones."
         )
     log_action(conn, safe_table_name, None, "DROP_TABLE", username)
-    conn.execute(text(f"DROP TABLE IF EXISTS {safe_table_name}"))
+    quote = conn.dialect.identifier_preparer.quote
+    conn.execute(text(f"DROP TABLE IF EXISTS {quote(safe_table_name)}"))
     conn.execute(text("DELETE FROM dynamic_table_columns WHERE table_name = :table_name"),
                  {"table_name": safe_table_name})
     conn.execute(text("DELETE FROM dynamic_tables_registry WHERE table_name = :table_name"),

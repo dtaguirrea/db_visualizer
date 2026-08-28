@@ -8,7 +8,7 @@ from sqlalchemy import text
 import config
 from src.audit import log_action
 from src.database import get_connection, utc_now
-from src.documents import safe_pdf_filename
+from src.documents import document_display_label, safe_pdf_filename
 
 if not st.session_state.get("logged_in"):
     st.stop()
@@ -18,7 +18,7 @@ st.caption("El visor utiliza la copia OCR del documento cuando está disponible.
 
 with get_connection() as conn:
     documents_df = pd.read_sql_query(text('''
-        SELECT document_id, source_reference, original_file_path, ocr_file_path,
+        SELECT document_id, title, source_reference, document_date, original_file_path, ocr_file_path,
                file_path, ocr_text, ocr_status
         FROM document_records
         ORDER BY document_id DESC
@@ -29,8 +29,8 @@ if documents_df.empty:
     st.stop()
 
 options = {
-    f"{int(row.document_id)} · {row.source_reference}": int(row.document_id)
-    for row in documents_df.itertuples()
+    document_display_label(row): int(row["document_id"])
+    for row in documents_df.to_dict("records")
 }
 selected_label = st.selectbox("Documento", list(options.keys()))
 selected_document_id = options[selected_label]
@@ -48,7 +48,7 @@ with col_pdf:
                     "Descargar PDF con OCR",
                     data=pdf_file,
                     file_name=safe_pdf_filename(
-                        selected_document_id, selected["source_reference"], ocr=True
+                        selected_document_id, selected.get("title") or selected.get("source_reference"), ocr=True
                     ),
                     mime="application/pdf",
                     key=f"extraction_download_ocr_{selected_document_id}",

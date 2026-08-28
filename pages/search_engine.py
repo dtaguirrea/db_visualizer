@@ -6,7 +6,7 @@ from urllib.parse import quote
 import streamlit as st
 
 from src.database import get_connection
-from src.documents import document_text_snippets
+from src.documents import document_display_label, document_text_snippets
 from src.search import global_search
 from src.table_relations import document_viewer_url
 
@@ -76,7 +76,7 @@ with tab_documents:
     if not documents:
         st.info("Sin coincidencias en documentos.")
     for row in documents:
-        st.markdown(f"**{int(row['document_id'])} · {html.escape(row['source_reference'])}**")
+        st.markdown(f"**{html.escape(document_display_label(row))}**")
         st.caption(
             f"{row['original_format'] or 'Formato no indicado'} · OCR: {row['ocr_status']} · "
             f"{row['created_by']}"
@@ -85,8 +85,13 @@ with tab_documents:
         if contexts:
             for context in contexts:
                 st.markdown(_highlight(context, query), unsafe_allow_html=True)
-        elif query.casefold() in (row.get("source_reference") or "").casefold():
-            st.markdown(_highlight(row["source_reference"], query), unsafe_allow_html=True)
+        else:
+            metadata_match = " · ".join(
+                str(value) for value in [row.get("title"), row.get("source_reference"), row.get("document_date")]
+                if value
+            )
+            if query.casefold() in metadata_match.casefold():
+                st.markdown(_highlight(metadata_match, query), unsafe_allow_html=True)
         st.link_button(
             f"Abrir documento {int(row['document_id'])}",
             document_viewer_url(row["document_id"]),
@@ -98,8 +103,7 @@ with tab_extractions:
         st.info("Sin coincidencias en extracciones.")
     for row in extractions:
         st.markdown(
-            f"**Extracción {int(row['extraction_id'])} · Documento {int(row['document_id'])} · "
-            f"{html.escape(row['source_reference'])}**"
+            f"**Extracción {int(row['extraction_id'])} · {html.escape(document_display_label(row))}**"
         )
         st.caption(
             f"{row['element_category'] or 'Sin categoría'} · {row['review_status']} · {row['created_by']}"

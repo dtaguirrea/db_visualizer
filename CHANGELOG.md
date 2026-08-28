@@ -4,6 +4,28 @@ Este archivo registra cambios relevantes de `db_visualizer`.
 
 El proyecto utiliza versionado semántico (`MAJOR.MINOR.PATCH`).
 
+## [1.1.0] - 2026-08-28
+
+### Añadido
+- Los documentos pueden registrar título o nombre, origen/procedencia y fecha del documento.
+- Los tres metadatos documentales son opcionales y pueden almacenarse como `NULL`.
+- Los selectores de llaves foráneas a documentos priorizan el título y muestran procedencia y fecha cuando existen.
+- La búsqueda global incluye título, procedencia y fecha de los documentos.
+- La imagen OCR y su política de descarga pueden configurarse mediante `OCR_IMAGE` y `OCR_PULL_POLICY`.
+
+### Corregido
+- Se corrige el error `DuplicateColumn` que podía generar pares como `Nombre`/`nombre` y `Mencion`/`mencion` al insertar registros en PostgreSQL.
+- Las tablas y columnas dinámicas nuevas se normalizan a identificadores técnicos en minúsculas.
+- Al iniciar, los metadatos de tablas dinámicas existentes se reconcilian con el esquema físico para eliminar duplicados por mayúsculas/minúsculas sin borrar registros de usuario.
+- La inserción de registros canonicaliza defensivamente los nombres de columnas y evita emitir SQL con la misma columna más de una vez.
+- La búsqueda de tablas dinámicas ignora metadatos que no correspondan a columnas físicas reales.
+
+## [1.0.1] - 2026-08-28
+
+### Corregido
+- Se corrige la referencia de la imagen HURIDOCS: `v0.0.35` está publicada en Docker Hub como `huridocs/pdf-document-layout-analysis:v0.0.35`, no en GHCR.
+- El servicio OCR vuelve a poder descargarse con `docker compose up --build -d`.
+
 ## [1.0.0] - 2026-08-28
 
 ### Añadido

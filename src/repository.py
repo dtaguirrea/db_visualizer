@@ -3,7 +3,7 @@ from datetime import date, datetime, time
 from decimal import Decimal
 
 import pandas as pd
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from sqlalchemy.engine import Connection
 
 from src.audit import log_action
@@ -53,14 +53,53 @@ def _pk_key(value):
     return _clean_value(value)
 
 
+def _quote(conn: Connection, identifier: str) -> str:
+    return conn.dialect.identifier_preparer.quote(identifier)
+
+
+def _canonical_user_values(conn: Connection, table_name: str, values: dict, pk_column: str) -> dict:
+    """Mapea las claves recibidas a los nombres físicos reales, ignorando diferencias de mayúsculas.
+
+    Esto también protege instalaciones que alcanzaron a guardar metadatos duplicados como
+    ``Nombre``/``nombre`` antes de la migración de v1.1.0.
+    """
+    physical_columns = {
+        column["name"].casefold(): column["name"]
+        for column in inspect(conn).get_columns(table_name)
+    }
+    protected = {pk_column.casefold(), *(column.casefold() for column in AUDIT_COLUMNS)}
+    canonical: dict = {}
+
+    for supplied_name, supplied_value in values.items():
+        logical_name = str(supplied_name).casefold()
+        if logical_name in protected:
+            continue
+        physical_name = physical_columns.get(logical_name)
+        if physical_name is None:
+            raise InvalidRecordError(
+                f"La columna '{supplied_name}' no existe en la tabla '{table_name}'. Recarga la página."
+            )
+
+        cleaned = _clean_value(supplied_value)
+        if physical_name not in canonical:
+            canonical[physical_name] = cleaned
+            continue
+
+        previous = canonical[physical_name]
+        if _is_missing(previous) and not _is_missing(cleaned):
+            canonical[physical_name] = cleaned
+        elif not _is_missing(previous) and not _is_missing(cleaned) and previous != cleaned:
+            raise InvalidRecordError(
+                f"El campo '{physical_name}' fue recibido dos veces con valores distintos. Recarga la página."
+            )
+
+    return canonical
+
+
 def insert_record(conn: Connection, table_name: str, values: dict, username: str, *, commit: bool = True):
     """Inserta una fila sin depender de cómo Streamlit represente una fila vacía."""
     pk_column = get_primary_key_column(conn, table_name)
-    user_values = {
-        column: _clean_value(value)
-        for column, value in values.items()
-        if column not in AUDIT_COLUMNS and column != pk_column
-    }
+    user_values = _canonical_user_values(conn, table_name, values, pk_column)
     if not user_values:
         raise InvalidRecordError("No hay datos para guardar.")
 
@@ -74,11 +113,14 @@ def insert_record(conn: Connection, table_name: str, values: dict, username: str
     })
     columns = list(user_values) + list(AUDIT_COLUMNS)
     placeholders = [f":{column}" for column in columns]
+    q_table = _quote(conn, table_name)
+    q_pk = _quote(conn, pk_column)
+    q_columns = [_quote(conn, column) for column in columns]
 
     try:
         result = conn.execute(text(
-            f"INSERT INTO {table_name} ({', '.join(columns)}) "
-            f"VALUES ({', '.join(placeholders)}) RETURNING {pk_column}"
+            f"INSERT INTO {q_table} ({', '.join(q_columns)}) "
+            f"VALUES ({', '.join(placeholders)}) RETURNING {q_pk}"
         ), params)
         new_pk = result.scalar_one()
         log_action(conn, table_name, new_pk, "INSERT", username,
@@ -94,11 +136,7 @@ def insert_record(conn: Connection, table_name: str, values: dict, username: str
 
 def sync_table_edits(conn: Connection, table_name: str, original_df: pd.DataFrame,
                      edited_df: pd.DataFrame, username: str) -> dict:
-    """Sincroniza cambios sobre filas existentes y eliminaciones.
-
-    Las nuevas filas también se aceptan por compatibilidad, aunque la interfaz
-    principal utiliza ``insert_record`` desde un formulario dedicado.
-    """
+    """Sincroniza cambios sobre filas existentes y eliminaciones."""
     pk_column = get_primary_key_column(conn, table_name)
     editable_columns = [
         c for c in edited_df.columns
@@ -106,6 +144,8 @@ def sync_table_edits(conn: Connection, table_name: str, original_df: pd.DataFram
     ]
     summary = {"inserted": 0, "updated": 0, "deleted": 0}
     now = utc_now()
+    q_table = _quote(conn, table_name)
+    q_pk = _quote(conn, pk_column)
 
     original_by_pk = {
         _pk_key(row[pk_column]): row
@@ -119,7 +159,7 @@ def sync_table_edits(conn: Connection, table_name: str, original_df: pd.DataFram
             raw_pk = edited_row.get(pk_column)
             if _is_missing(raw_pk):
                 params = {c: _clean_value(edited_row.get(c)) for c in editable_columns}
-                new_pk = insert_record(conn, table_name, params, username, commit=False)
+                insert_record(conn, table_name, params, username, commit=False)
                 summary["inserted"] += 1
                 continue
 
@@ -143,15 +183,15 @@ def sync_table_edits(conn: Connection, table_name: str, original_df: pd.DataFram
                     "pk": pk_value,
                     "original_updated_at": _clean_value(original_row.get("updated_at")),
                 })
-                assignments = [f"{c} = :{c}" for c in changed_columns]
+                assignments = [f"{_quote(conn, c)} = :{c}" for c in changed_columns]
                 assignments += ["updated_by = :updated_by", "updated_at = :updated_at"]
                 concurrency_clause = (
                     "updated_at IS NULL" if params["original_updated_at"] is None
                     else "updated_at = :original_updated_at"
                 )
                 result = conn.execute(text(
-                    f"UPDATE {table_name} SET {', '.join(assignments)} "
-                    f"WHERE {pk_column} = :pk AND {concurrency_clause}"
+                    f"UPDATE {q_table} SET {', '.join(assignments)} "
+                    f"WHERE {q_pk} = :pk AND {concurrency_clause}"
                 ), params)
                 if result.rowcount != 1:
                     raise ConcurrentEditError(
@@ -171,7 +211,7 @@ def sync_table_edits(conn: Connection, table_name: str, original_df: pd.DataFram
                 else "updated_at = :original_updated_at"
             )
             result = conn.execute(text(
-                f"DELETE FROM {table_name} WHERE {pk_column} = :pk AND {concurrency_clause}"
+                f"DELETE FROM {q_table} WHERE {q_pk} = :pk AND {concurrency_clause}"
             ), params)
             if result.rowcount != 1:
                 raise ConcurrentEditError(

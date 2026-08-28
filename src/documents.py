@@ -20,8 +20,29 @@ def get_ocr_pdf_path(document: dict) -> str | None:
     return path if path and Path(path).is_file() else None
 
 
-def safe_pdf_filename(document_id: int, source_reference: str | None, *, ocr: bool = True) -> str:
-    reference = unicodedata.normalize("NFKD", source_reference or "documento")
+def document_display_label(document: dict, *, include_id: bool = True) -> str:
+    """Construye una etiqueta legible usando título, procedencia y fecha cuando existen."""
+    document_id = document.get("document_id")
+    title = str(document.get("title") or "").strip()
+    source = str(document.get("source_reference") or "").strip()
+    date_value = str(document.get("document_date") or "").strip()
+
+    details = []
+    if title:
+        details.append(title)
+    if source and source.casefold() != title.casefold():
+        details.append(source)
+    if date_value:
+        details.append(date_value)
+
+    detail_text = " · ".join(details)
+    if include_id and document_id is not None:
+        return f"{document_id} · {detail_text}" if detail_text else f"Documento {document_id}"
+    return detail_text or (f"Documento {document_id}" if document_id is not None else "Documento")
+
+
+def safe_pdf_filename(document_id: int, label: str | None, *, ocr: bool = True) -> str:
+    reference = unicodedata.normalize("NFKD", label or "documento")
     reference = "".join(char for char in reference if not unicodedata.combining(char))
     reference = re.sub(r"[^A-Za-z0-9._-]+", "_", reference).strip("._-")
     reference = reference[:80] or "documento"
@@ -38,7 +59,6 @@ def document_text_snippets(text: str | None, query: str, *, limit: int = 20, rad
 
     matches = list(re.finditer(re.escape(needle), source, flags=re.IGNORECASE))
     if not matches:
-        # Si no aparece la frase completa, busca los términos individuales.
         terms = [term for term in re.findall(r"\w+", needle, flags=re.UNICODE) if len(term) >= 2]
         if terms:
             pattern = re.compile("|".join(re.escape(term) for term in terms), flags=re.IGNORECASE)

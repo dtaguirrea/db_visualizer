@@ -19,7 +19,8 @@ services:
       - db_visualizer_network
 
   ocr_service:
-    image: ghcr.io/huridocs/pdf-document-layout-analysis:v0.0.35
+    image: ${OCR_IMAGE:-huridocs/pdf-document-layout-analysis:v0.0.35}
+    pull_policy: ${OCR_PULL_POLICY:-missing}
     entrypoint: ["./start.sh"]
     restart: unless-stopped
     networks:
@@ -52,6 +53,7 @@ services:
       AUTH_SESSION_DAYS: ${AUTH_SESSION_DAYS:-7}
       AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
       SEARCH_RESULT_LIMIT: ${SEARCH_RESULT_LIMIT:-100}
+      MIN_PASSWORD_LENGTH: ${MIN_PASSWORD_LENGTH:-12}
     volumes:
       - uploaded_files:/app/uploaded_files
     depends_on:

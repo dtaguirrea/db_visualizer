@@ -37,14 +37,14 @@ from src.database import (
     list_user_tables,
     utc_now,
 )
-from src.documents import document_text_snippets, safe_pdf_filename
+from src.documents import document_display_label, document_text_snippets, safe_pdf_filename
 from src.dynamic_tables import InvalidIdentifierError, create_dynamic_table, drop_dynamic_table, validate_identifier
 from src.repository import ConcurrentEditError, insert_record, sync_table_edits
 from src.search import global_search
 from src.table_relations import document_viewer_url, get_foreign_key_choices
 
 
-def test_v1_0_0_core_logic():
+def test_v1_1_0_core_logic():
     init_db()
 
     with get_connection() as conn:
@@ -78,20 +78,22 @@ def test_v1_0_0_core_logic():
         raise AssertionError("Debió fallar")
     except InvalidIdentifierError:
         pass
-    assert validate_identifier("Mi Columna") == "Mi_Columna"
+    assert validate_identifier("Mi Columna") == "mi_columna"
 
     with get_connection() as conn:
         now = utc_now()
         document_id = conn.execute(text('''
             INSERT INTO document_records (
-                source_reference, original_format, file_path, original_file_path,
+                title, source_reference, document_date, original_format, file_path, original_file_path,
                 ocr_text, ocr_status, created_by, created_at, updated_by, updated_at
             ) VALUES (
-                :source_reference, :original_format, :file_path, :original_file_path,
+                :title, :source_reference, :document_date, :original_format, :file_path, :original_file_path,
                 :ocr_text, :ocr_status, :created_by, :created_at, :updated_by, :updated_at
             ) RETURNING document_id
         '''), {
-            "source_reference": "Caja 1 - Doc 1",
+            "title": "Tarjeta histórica",
+            "source_reference": "Archivo Nacional",
+            "document_date": "1973-09-11",
             "original_format": "PDF digitalizado",
             "file_path": "/tmp/fake.pdf",
             "original_file_path": "/tmp/fake.pdf",
@@ -103,6 +105,26 @@ def test_v1_0_0_core_logic():
             "updated_at": now,
         }).scalar_one()
         conn.commit()
+
+        null_metadata_document_id = conn.execute(text('''
+            INSERT INTO document_records (
+                title, source_reference, document_date, original_format, file_path, original_file_path,
+                ocr_text, ocr_status, created_by, created_at, updated_by, updated_at
+            ) VALUES (
+                NULL, NULL, NULL, 'PDF nativo', '/tmp/empty.pdf', '/tmp/empty.pdf',
+                '', 'pendiente', 'admin', :now, 'admin', :now
+            ) RETURNING document_id
+        '''), {"now": utc_now()}).scalar_one()
+        conn.commit()
+        assert null_metadata_document_id > document_id
+
+        label = document_display_label({
+            "document_id": document_id,
+            "title": "Tarjeta histórica",
+            "source_reference": "Archivo Nacional",
+            "document_date": "1973-09-11",
+        })
+        assert label == f"{document_id} · Tarjeta histórica · Archivo Nacional · 1973-09-11"
 
         table_name = create_dynamic_table(
             conn,
@@ -121,7 +143,7 @@ def test_v1_0_0_core_logic():
         assert [item["column_type"] for item in metadata] == ["Texto", "Fecha", "Documento"]
 
         choices = get_foreign_key_choices(conn, table_name)["documento_id"]
-        assert choices["labels"][document_id] == f"{document_id} · Caja 1 - Doc 1"
+        assert choices["labels"][document_id] == label
         assert document_viewer_url(document_id) == f"/documento?document_id={document_id}"
 
         new_pk = insert_record(conn, table_name, {
@@ -156,14 +178,17 @@ def test_v1_0_0_core_logic():
         '''), {"document_id": document_id, "now": utc_now()})
         conn.commit()
 
+        search_title = global_search(conn, "Tarjeta histórica")
+        assert len(search_title["documents"]) == 1
+        search_source = global_search(conn, "Archivo Nacional")
+        assert len(search_source["documents"]) == 1
         search_prueba = global_search(conn, "prueba")
         assert len(search_prueba["documents"]) == 1
         assert len(search_prueba["extractions"]) == 1
         search_tarjeta = global_search(conn, "Tarjeta")
         assert any(row["table_name"] == table_name for row in search_tarjeta["tables"])
-        # Los comodines SQL se tratan como texto literal y no rompen la consulta.
         assert isinstance(global_search(conn, "%"), dict)
-        assert isinstance(global_search(conn, "_") , dict)
+        assert isinstance(global_search(conn, "_"), dict)
         assert isinstance(global_search(conn, "\\"), dict)
 
         snapshot_a = current.copy()
@@ -179,6 +204,47 @@ def test_v1_0_0_core_logic():
             raise AssertionError("Debió detectar conflicto concurrente")
         except ConcurrentEditError:
             pass
+
+        personas = create_dynamic_table(
+            conn,
+            "Personas",
+            [
+                {"name": "Nombre", "type": "Texto", "foreign_key_table": None},
+                {"name": "Mencion", "type": "Documento", "foreign_key_table": "document_records"},
+            ],
+            "Personas mencionadas",
+            "admin",
+        )
+        assert personas == "personas"
+        personas_metadata = get_dynamic_column_metadata(conn, personas)
+        assert [row["column_name"] for row in personas_metadata] == ["nombre", "mencion"]
+        persona_id = insert_record(conn, personas, {
+            "Nombre": "Juan",
+            "nombre": None,
+            "Mencion": None,
+            "mencion": document_id,
+        }, "admin")
+        assert persona_id == 1
+
+        conn.execute(text('''
+            INSERT INTO dynamic_table_columns (
+                table_name, column_name, column_type, ordinal_position, foreign_key_table
+            ) VALUES ('personas', 'Nombre', 'Texto', 0, NULL)
+        '''))
+        conn.execute(text('''
+            INSERT INTO dynamic_table_columns (
+                table_name, column_name, column_type, ordinal_position, foreign_key_table
+            ) VALUES ('personas', 'Mencion', 'Documento', 1, 'document_records')
+        '''))
+        conn.commit()
+        init_db()
+        repaired = get_dynamic_column_metadata(conn, personas)
+        assert [row["column_name"] for row in repaired] == ["nombre", "mencion"]
+        assert [row["column_type"] for row in repaired] == ["Texto", "Documento"]
+        preserved_person = conn.execute(text("SELECT nombre, mencion FROM personas WHERE record_id = 1")).mappings().one()
+        assert preserved_person["nombre"] == "Juan"
+        assert int(preserved_person["mencion"]) == document_id
+        drop_dynamic_table(conn, personas, "admin")
 
         child_table = create_dynamic_table(
             conn,
