@@ -19,8 +19,9 @@ services:
       - db_visualizer_network
 
   ocr_service:
-    image: ${OCR_IMAGE:-huridocs/pdf-document-layout-analysis:v0.0.35}
+    image: ${OCR_IMAGE:-ghcr.io/huridocs/pdf-document-layout-analysis:latest}
     pull_policy: ${OCR_PULL_POLICY:-missing}
+    container_name: db_visualizer_ocr_service
     entrypoint: ["./start.sh"]
     restart: unless-stopped
     networks:
@@ -46,6 +47,9 @@ services:
       OCR_USE_FAST_MODE: ${OCR_USE_FAST_MODE:-false}
       OCR_ROTATE_PAGES: ${OCR_ROTATE_PAGES:-true}
       OCR_DESKEW: ${OCR_DESKEW:-true}
+      OCR_QUEUE_MAX_SIZE: ${OCR_QUEUE_MAX_SIZE:-20}
+      OCR_WORKER_POLL_SECONDS: ${OCR_WORKER_POLL_SECONDS:-3}
+      OCR_TEXT_EXTRACTION_MODE: ${OCR_TEXT_EXTRACTION_MODE:-local}
       BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-admin}
       BOOTSTRAP_ADMIN_FULL_NAME: ${BOOTSTRAP_ADMIN_FULL_NAME:-Administrador}
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?Set BOOTSTRAP_ADMIN_PASSWORD in .env}
@@ -58,6 +62,39 @@ services:
       - uploaded_files:/app/uploaded_files
     depends_on:
       db:
+        condition: service_healthy
+      ocr_service:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - db_visualizer_network
+
+  ocr_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    entrypoint: ["python", "-m", "src.ocr_worker"]
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-db_visualizer}
+      DB_USER: ${POSTGRES_USER:-db_visualizer}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      UPLOAD_DIR: /app/uploaded_files
+      OCR_SERVICE_URL: http://ocr_service:5060
+      OCR_LANGUAGE: ${OCR_LANGUAGE:-es}
+      OCR_TIMEOUT_SECONDS: ${OCR_TIMEOUT_SECONDS:-600}
+      OCR_USE_FAST_MODE: ${OCR_USE_FAST_MODE:-false}
+      OCR_ROTATE_PAGES: ${OCR_ROTATE_PAGES:-true}
+      OCR_DESKEW: ${OCR_DESKEW:-true}
+      OCR_QUEUE_MAX_SIZE: ${OCR_QUEUE_MAX_SIZE:-20}
+      OCR_WORKER_POLL_SECONDS: ${OCR_WORKER_POLL_SECONDS:-3}
+      OCR_TEXT_EXTRACTION_MODE: ${OCR_TEXT_EXTRACTION_MODE:-local}
+    volumes:
+      - uploaded_files:/app/uploaded_files
+    depends_on:
+      app:
         condition: service_healthy
       ocr_service:
         condition: service_started

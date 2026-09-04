@@ -5,6 +5,7 @@ from decimal import Decimal
 import pandas as pd
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import IntegrityError
 
 from src.audit import log_action
 from src.database import get_primary_key_column, utc_now
@@ -18,6 +19,10 @@ class ConcurrentEditError(RuntimeError):
 
 class InvalidRecordError(ValueError):
     """Un valor ingresado no se puede persistir de forma segura."""
+
+
+class RecordInUseError(InvalidRecordError):
+    """Otro registro todavía referencia la fila que se intenta eliminar."""
 
 
 def _is_missing(value) -> bool:
@@ -222,6 +227,45 @@ def sync_table_edits(conn: Connection, table_name: str, original_df: pd.DataFram
 
         conn.commit()
         return summary
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def delete_records(conn: Connection, table_name: str, records: list[dict], username: str) -> int:
+    """Elimina explícitamente varias filas con auditoría y control de concurrencia."""
+    if not records:
+        return 0
+    pk_column = get_primary_key_column(conn, table_name)
+    q_table = _quote(conn, table_name)
+    q_pk = _quote(conn, pk_column)
+    deleted = 0
+    try:
+        for record in records:
+            pk_value = _clean_value(record.get("pk"))
+            expected_updated_at = _clean_value(record.get("updated_at"))
+            params = {"pk": pk_value, "expected_updated_at": expected_updated_at}
+            concurrency_clause = (
+                "updated_at IS NULL" if expected_updated_at is None
+                else "updated_at = :expected_updated_at"
+            )
+            result = conn.execute(text(
+                f"DELETE FROM {q_table} WHERE {q_pk} = :pk AND {concurrency_clause}"
+            ), params)
+            if result.rowcount != 1:
+                raise ConcurrentEditError(
+                    f"El registro {pk_value} cambió o ya fue eliminado. Recarga la tabla."
+                )
+            log_action(conn, table_name, pk_value, "DELETE", username)
+            deleted += 1
+        conn.commit()
+        return deleted
+    except IntegrityError as exc:
+        conn.rollback()
+        raise RecordInUseError(
+            "No se puede eliminar la selección porque otro registro todavía la referencia. "
+            "Elimina primero los registros dependientes."
+        ) from exc
     except Exception:
         conn.rollback()
         raise

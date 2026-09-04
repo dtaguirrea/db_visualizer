@@ -1,6 +1,8 @@
 import os
 import shutil
 import sys
+from datetime import date, timedelta
+from pathlib import Path
 
 TEST_ROOT = "/tmp/db_visualizer_test"
 shutil.rmtree(TEST_ROOT, ignore_errors=True)
@@ -16,6 +18,7 @@ os.environ["BOOTSTRAP_ADMIN_PASSWORD"] = "ClaveInicialSegura123!"
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pandas as pd
+from pypdf import PdfWriter
 from sqlalchemy import text
 
 import config
@@ -38,10 +41,30 @@ from src.database import (
     utc_now,
 )
 from src.documents import document_display_label, document_text_snippets, safe_pdf_filename
+from src.document_service import (
+    DocumentBusyError,
+    InvalidDocumentDate,
+    QueueFullError,
+    claim_next_document,
+    delete_document,
+    enqueue_documents,
+    get_queue_counts,
+    normalize_document_date,
+    process_next_document,
+    queue_snapshot,
+    recover_interrupted_jobs,
+    requeue_document,
+    update_document_metadata,
+)
 from src.dynamic_tables import InvalidIdentifierError, create_dynamic_table, drop_dynamic_table, validate_identifier
-from src.repository import ConcurrentEditError, insert_record, sync_table_edits
+from src.ocr_client import extract_text_locally
+from src.repository import ConcurrentEditError, delete_records, insert_record, sync_table_edits
 from src.search import global_search
-from src.table_relations import document_viewer_url, get_foreign_key_choices
+from src.table_relations import (
+    document_viewer_url,
+    extraction_workspace_url,
+    get_foreign_key_choices,
+)
 
 
 def test_v1_1_0_core_logic():
@@ -145,6 +168,7 @@ def test_v1_1_0_core_logic():
         choices = get_foreign_key_choices(conn, table_name)["documento_id"]
         assert choices["labels"][document_id] == label
         assert document_viewer_url(document_id) == f"/documento?document_id={document_id}"
+        assert extraction_workspace_url(document_id) == f"/extraccion?document_id={document_id}"
 
         new_pk = insert_record(conn, table_name, {
             "nombre": "Tarjeta perforada IBM",
@@ -270,3 +294,190 @@ def test_v1_1_0_core_logic():
 
     assert safe_pdf_filename(12, "Caja Ñ / Documento 1") == "12_Caja_N_Documento_1_OCR.pdf"
     assert document_text_snippets("uno dos tres prueba cinco", "prueba")
+
+
+def test_v2_document_queue_and_crud(monkeypatch):
+    init_db()
+    with get_connection() as conn:
+        conn.execute(text(
+            "UPDATE document_records SET ocr_status = 'error' "
+            "WHERE ocr_status IN ('en_cola', 'procesando', 'pendiente')"
+        ))
+        conn.commit()
+
+    monkeypatch.setattr(config, "OCR_QUEUE_MAX_SIZE", 2)
+    first_original = Path(config.UPLOAD_DIR) / "queue_first_original.pdf"
+    second_original = Path(config.UPLOAD_DIR) / "queue_second_original.pdf"
+    third_original = Path(config.UPLOAD_DIR) / "queue_third_original.pdf"
+    for path in (first_original, second_original, third_original):
+        path.write_bytes(b"%PDF-1.4\n%%EOF")
+
+    document_ids = enqueue_documents([
+        {
+            "title": "Documento de 1800",
+            "source_reference": "Archivo A",
+            "document_date": "1800-01-01",
+            "original_format": "PDF digitalizado",
+            "original_file_path": str(first_original),
+        },
+        {
+            "title": "Documento reciente",
+            "source_reference": "Archivo B",
+            "document_date": date.today(),
+            "original_format": "PDF nativo",
+            "ocr_language": "en",
+            "original_file_path": str(second_original),
+        },
+    ], "admin")
+    assert len(document_ids) == 2
+    assert get_queue_counts()["disponibles"] == 0
+    assert [row["document_id"] for row in queue_snapshot()] == document_ids
+
+    try:
+        enqueue_documents([{
+            "title": "Sin espacio",
+            "source_reference": None,
+            "document_date": None,
+            "original_format": "PDF nativo",
+            "original_file_path": str(third_original),
+        }], "admin")
+        raise AssertionError("Debió rechazar una cola completa")
+    except QueueFullError:
+        pass
+
+    received_languages = []
+
+    def fake_create_searchable_pdf(input_path, output_path, language=None):
+        received_languages.append(language)
+        Path(output_path).write_bytes(Path(input_path).read_bytes())
+        return output_path
+
+    monkeypatch.setattr(
+        "src.document_service.create_searchable_pdf", fake_create_searchable_pdf
+    )
+    monkeypatch.setattr(config, "OCR_TEXT_EXTRACTION_MODE", "local")
+    monkeypatch.setattr("src.document_service.extract_text_locally", lambda _path: "texto OCR indexado")
+    assert process_next_document() is True
+    with get_connection() as conn:
+        first = conn.execute(text('''
+            SELECT ocr_status, ocr_text, ocr_attempts, updated_at, ocr_file_path
+            FROM document_records WHERE document_id = :document_id
+        '''), {"document_id": document_ids[0]}).mappings().one()
+    assert first["ocr_status"] == "completado"
+    assert first["ocr_text"] == "texto OCR indexado"
+    assert first["ocr_attempts"] == 1
+    assert Path(first["ocr_file_path"]).is_file()
+
+    def fail_indexing(_path):
+        raise RuntimeError("indexación no disponible")
+
+    monkeypatch.setattr("src.document_service.extract_text_locally", fail_indexing)
+    assert process_next_document() is True
+    with get_connection() as conn:
+        second = conn.execute(text('''
+            SELECT ocr_status, ocr_error, ocr_file_path
+            FROM document_records WHERE document_id = :document_id
+        '''), {"document_id": document_ids[1]}).mappings().one()
+    assert second["ocr_status"] == "parcial"
+    assert "indexación no disponible" in second["ocr_error"]
+    assert Path(second["ocr_file_path"]).is_file()
+    assert process_next_document() is False
+    assert received_languages == [config.OCR_LANGUAGE, "en"]
+
+    update_document_metadata(
+        document_ids[0],
+        title="Documento histórico editado",
+        source_reference="Archivo corregido",
+        document_date="1800-12-31",
+        original_format="Microfilm digitalizado",
+        ocr_language="fr",
+        username="admin",
+        expected_updated_at=first["updated_at"],
+    )
+    with get_connection() as conn:
+        updated = conn.execute(text('''
+            SELECT title, document_date, ocr_language
+            FROM document_records WHERE document_id = :document_id
+        '''), {"document_id": document_ids[0]}).mappings().one()
+        extraction_id = conn.execute(text('''
+            INSERT INTO extraction_records (
+                document_id, review_status, created_by, created_at, updated_by, updated_at
+            ) VALUES (
+                :document_id, 'Pendiente', 'admin', :now, 'admin', :now
+            ) RETURNING extraction_id
+        '''), {"document_id": document_ids[0], "now": utc_now()}).scalar_one()
+        conn.commit()
+    assert updated["title"] == "Documento histórico editado"
+    assert updated["document_date"] == "1800-12-31"
+    assert updated["ocr_language"] == "fr"
+
+    try:
+        normalize_document_date("1799-12-31")
+        raise AssertionError("Debió rechazar una fecha anterior a 1800")
+    except InvalidDocumentDate:
+        pass
+    try:
+        normalize_document_date(date.today() + timedelta(days=1))
+        raise AssertionError("Debió rechazar una fecha futura")
+    except InvalidDocumentDate:
+        pass
+
+    first_paths = [first_original, Path(first["ocr_file_path"])]
+    delete_document(document_ids[0], "admin")
+    assert all(not path.exists() for path in first_paths)
+    with get_connection() as conn:
+        assert conn.execute(text(
+            "SELECT COUNT(*) FROM document_records WHERE document_id = :document_id"
+        ), {"document_id": document_ids[0]}).scalar_one() == 0
+        assert conn.execute(text(
+            "SELECT COUNT(*) FROM extraction_records WHERE extraction_id = :extraction_id"
+        ), {"extraction_id": extraction_id}).scalar_one() == 0
+
+    requeue_document(document_ids[1], "admin")
+    claimed = claim_next_document()
+    assert claimed["document_id"] == document_ids[1]
+    try:
+        delete_document(document_ids[1], "admin")
+        raise AssertionError("Debió impedir eliminar un documento en procesamiento")
+    except DocumentBusyError:
+        pass
+    assert recover_interrupted_jobs() == 1
+    second_paths = [second_original, Path(second["ocr_file_path"])]
+    delete_document(document_ids[1], "admin")
+    assert all(not path.exists() for path in second_paths)
+    third_original.unlink(missing_ok=True)
+
+
+def test_v2_1_explicit_record_deletion():
+    init_db()
+    with get_connection() as conn:
+        table_name = create_dynamic_table(
+            conn,
+            "delete_rows_test",
+            [{"name": "nombre", "type": "Texto", "foreign_key_table": None}],
+            "Prueba de eliminación explícita",
+            "admin",
+        )
+        first_id = insert_record(conn, table_name, {"nombre": "Conservar"}, "admin")
+        second_id = insert_record(conn, table_name, {"nombre": "Eliminar"}, "admin")
+        row = conn.execute(text(f'''
+            SELECT record_id, updated_at FROM {table_name} WHERE record_id = :record_id
+        '''), {"record_id": second_id}).mappings().one()
+        assert delete_records(conn, table_name, [{
+            "pk": row["record_id"], "updated_at": row["updated_at"]
+        }], "admin") == 1
+        remaining = conn.execute(text(
+            f"SELECT record_id FROM {table_name} ORDER BY record_id"
+        )).scalars().all()
+        assert remaining == [first_id]
+        drop_dynamic_table(conn, table_name, "admin")
+
+
+def test_v2_1_local_pdf_text_extraction():
+    pdf_path = Path(config.UPLOAD_DIR) / "blank_text_layer_test.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=300, height=300)
+    with pdf_path.open("wb") as output:
+        writer.write(output)
+    assert extract_text_locally(str(pdf_path)) == ""
+    pdf_path.unlink(missing_ok=True)

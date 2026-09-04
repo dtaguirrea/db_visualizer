@@ -2,19 +2,26 @@
 
 **db_visualizer** es una plataforma colaborativa para gestión documental y estructuración de datos. Permite trabajar con documentos PDF, aplicar OCR, consultar el texto reconocido, organizar información en tablas relacionales y mantener trazabilidad sobre las modificaciones realizadas por los usuarios.
 
-**Versión estable actual:** `1.1.0`
+**Versión estable actual:** `2.1.0`
 
 La interfaz de usuario está en español. Los identificadores del código y la configuración técnica utilizan nombres en inglés cuando corresponde.
 
 ## Funcionalidades principales
 
-- Carga y administración de documentos PDF con título, procedencia y fecha opcionales.
+- Carga múltiple de hasta 20 documentos PDF en una cola persistente.
+- Procesamiento OCR secuencial, con un único documento activo a la vez.
+- Selección de idioma OCR para cada documento.
+- Administración de documentos con edición y eliminación confirmada.
+- Fechas documentales opcionales desde 1800 hasta la actualidad.
 - Generación de PDFs buscables mediante OCR con [HURIDOCS PDF Document Layout Analysis](https://github.com/huridocs/pdf-document-layout-analysis).
 - Visualización, búsqueda y descarga del PDF procesado con OCR.
 - Conservación separada del documento original y de su copia OCR.
 - Registro de extracciones de información asociadas a documentos.
+- Fichaje de evidencias con página, cita literal, análisis, cruces y estado de revisión.
+- Edición, eliminación, filtrado y exportación CSV de fichas documentales.
 - Creación de tablas personalizadas desde la interfaz.
 - Edición colaborativa de registros mediante PostgreSQL.
+- Eliminación explícita y confirmada de registros en tablas personalizadas.
 - Llaves foráneas entre tablas personalizadas.
 - Llaves foráneas hacia documentos mediante un selector desplegable con título, procedencia y fecha.
 - Apertura directa del documento asociado desde una tabla.
@@ -30,21 +37,21 @@ La interfaz de usuario está en español. Los identificadores del código y la c
 Navegador
    |
    v
-Aplicación Streamlit
-   |---------------------> Servicio OCR HURIDOCS
-   |
-   +---------------------> PostgreSQL
-   |
-   +---------------------> Volumen persistente de PDFs
+Aplicación Streamlit -----> PostgreSQL <----- Trabajador OCR
+          |                                      |
+          +-----> Volumen persistente de PDFs <--+
+                                                 |
+                                      Servicio OCR HURIDOCS
 ```
 
-El entorno Docker contiene tres servicios principales:
+El entorno Docker contiene cuatro servicios principales:
 
 | Servicio | Función |
 | --- | --- |
 | `app` | Aplicación web desarrollada con Streamlit |
 | `db` | Base de datos PostgreSQL compartida |
 | `ocr_service` | Servicio de OCR proporcionado por HURIDOCS |
+| `ocr_worker` | Consumidor exclusivo de la cola; procesa un PDF a la vez |
 
 PostgreSQL y HURIDOCS permanecen dentro de la red privada de Docker y no publican puertos directamente al host.
 
@@ -122,6 +129,12 @@ Logs del servicio OCR:
 docker compose logs -f ocr_service
 ```
 
+Logs de la cola y del documento que está siendo procesado:
+
+```bash
+docker compose logs -f ocr_worker
+```
+
 ### 4. Abrir db_visualizer
 
 En el navegador abre:
@@ -144,16 +157,16 @@ OCR_PULL_POLICY=never
 
 Con `OCR_PULL_POLICY=never`, Docker utiliza exclusivamente la imagen almacenada en el equipo y falla si esa imagen no existe localmente. Esto es útil en conexiones limitadas; para instalaciones nuevas se recomienda `missing`.
 
-## Actualización desde 1.0.x
+## Actualización desde versiones anteriores
 
-La actualización a `1.1.0` conserva los volúmenes existentes. No es necesario recrear PostgreSQL ni volver a cargar los documentos.
+La actualización a `2.1.0` conserva los volúmenes existentes. No es necesario recrear PostgreSQL ni volver a cargar los documentos.
 
 ```bash
 git pull
 docker compose up --build -d
 ```
 
-Al iniciar, la aplicación agrega los nuevos metadatos documentales y reconcilia automáticamente los metadatos de tablas dinámicas afectados por diferencias de mayúsculas/minúsculas. Esta migración no elimina las filas de las tablas creadas por los usuarios.
+Al iniciar, la aplicación agrega las columnas de idioma OCR y página de extracción, y conserva los documentos, fichas y tablas existentes. Los documentos que hayan quedado con estado `pendiente` pasan a la cola automáticamente.
 
 No utilices `docker compose down -v` durante una actualización, ya que `-v` elimina deliberadamente los volúmenes persistentes.
 
@@ -223,13 +236,16 @@ En un despliegue público no expongas directamente PostgreSQL ni el API de HURID
 | `AUTH_COOKIE_SECURE` | `false` | Requiere HTTPS para la cookie; producción lo fuerza a `true` |
 | `MIN_PASSWORD_LENGTH` | `12` | Largo mínimo permitido para contraseñas |
 | `SEARCH_RESULT_LIMIT` | `100` | Límite de resultados por categoría de búsqueda |
-| `OCR_IMAGE` | `huridocs/pdf-document-layout-analysis:v0.0.35` | Imagen del servicio OCR |
+| `OCR_IMAGE` | `ghcr.io/huridocs/pdf-document-layout-analysis:latest` | Imagen del servicio OCR |
 | `OCR_PULL_POLICY` | `missing` | Política de descarga de la imagen OCR (`missing` o `never`) |
 | `OCR_LANGUAGE` | `es` | Idioma enviado al servicio OCR |
 | `OCR_TIMEOUT_SECONDS` | `600` | Tiempo máximo de una solicitud OCR |
-| `OCR_USE_FAST_MODE` | `false` | Habilita el modo rápido de HURIDOCS cuando aplica |
+| `OCR_USE_FAST_MODE` | `false` | Habilita el modo rápido cuando `OCR_TEXT_EXTRACTION_MODE=huridocs` |
 | `OCR_ROTATE_PAGES` | `true` | Permite rotar páginas durante el OCR |
 | `OCR_DESKEW` | `true` | Corrige inclinación de páginas durante el OCR |
+| `OCR_QUEUE_MAX_SIZE` | `20` | Máximo de documentos entre espera y procesamiento |
+| `OCR_WORKER_POLL_SECONDS` | `3` | Intervalo de consulta de la cola cuando está vacía |
+| `OCR_TEXT_EXTRACTION_MODE` | `local` | Indexación desde el PDF (`local`), mediante HURIDOCS (`huridocs`) o desactivada (`disabled`) |
 | `APP_DOMAIN` | sin valor | Dominio utilizado por la configuración HTTPS |
 
 El archivo `.env` contiene secretos y **nunca debe subirse a GitHub**. Está excluido mediante `.gitignore`.
@@ -463,7 +479,7 @@ Consulta [SECURITY.md](SECURITY.md) antes de publicar la aplicación en Internet
 
 ## Dependencia OCR
 
-`db_visualizer` utiliza HURIDOCS `pdf-document-layout-analysis` para realizar OCR. La configuración Docker fija la imagen de Docker Hub `huridocs/pdf-document-layout-analysis:v0.0.35`, en lugar de utilizar `latest`, para evitar cambios inesperados de comportamiento provocados por actualizaciones automáticas de la dependencia.
+`db_visualizer` utiliza HURIDOCS `pdf-document-layout-analysis` para realizar OCR. La imagen se controla con `OCR_IMAGE`; la configuración incluida utiliza `ghcr.io/huridocs/pdf-document-layout-analysis:latest` y permite fijar otra versión desde `.env`.
 
 Proyecto original:
 

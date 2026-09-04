@@ -10,7 +10,13 @@ from src.database import (
     get_primary_key_column,
 )
 from src.dynamic_tables import list_registered_tables
-from src.repository import ConcurrentEditError, insert_record, sync_table_edits
+from src.repository import (
+    ConcurrentEditError,
+    InvalidRecordError,
+    delete_records,
+    insert_record,
+    sync_table_edits,
+)
 from src.table_relations import document_viewer_url, get_foreign_key_choices
 
 if not st.session_state.get("logged_in"):
@@ -61,7 +67,9 @@ with get_connection() as conn:
     fk_choices = get_foreign_key_choices(conn, selected_table)
     metadata = get_dynamic_column_metadata(conn, selected_table)
 
-    tab_records, tab_new = st.tabs(["Registros", "Nuevo registro"])
+    tab_records, tab_new, tab_delete = st.tabs([
+        "Registros", "Nuevo registro", "Eliminar registros"
+    ])
 
     with tab_records:
         display_df = original_df.copy()
@@ -85,7 +93,7 @@ with get_connection() as conn:
 
         edited_display_df = st.data_editor(
             display_df,
-            num_rows="delete",
+            num_rows="fixed",
             use_container_width=True,
             column_config=column_config,
             key=f"editor_v6_{selected_table}",
@@ -215,3 +223,65 @@ with get_connection() as conn:
                 except Exception as exc:
                     conn.rollback()
                     st.error(f"No fue posible agregar el registro: {exc}")
+
+    with tab_delete:
+        if original_df.empty:
+            st.info("La tabla no contiene registros para eliminar.")
+        else:
+            st.warning(
+                "La eliminación es permanente y queda registrada en Auditoría. "
+                "Si otra tabla usa uno de estos registros, la operación será bloqueada."
+            )
+            user_columns = [
+                column["column_name"] for column in metadata
+                if column["column_name"] in original_df.columns
+            ]
+            row_by_pk = {
+                row[pk_column]: row for row in original_df.to_dict("records")
+            }
+
+            def record_label(pk_value):
+                row = row_by_pk[pk_value]
+                details = [
+                    str(row.get(column)).strip()
+                    for column in user_columns
+                    if row.get(column) is not None and str(row.get(column)).strip()
+                ][:2]
+                return f"{pk_value} · {' · '.join(details)}" if details else str(pk_value)
+
+            selected_pks = st.multiselect(
+                "Registros que deseas eliminar",
+                options=list(row_by_pk),
+                format_func=record_label,
+            )
+            if selected_pks:
+                preview_columns = [pk_column] + user_columns
+                preview = original_df[original_df[pk_column].isin(selected_pks)][preview_columns]
+                st.dataframe(preview, use_container_width=True, hide_index=True)
+            confirmed = st.checkbox(
+                f"Confirmo la eliminación de {len(selected_pks)} registro(s)",
+                disabled=not selected_pks,
+            )
+            if st.button(
+                "Eliminar definitivamente",
+                type="primary",
+                disabled=not selected_pks or not confirmed,
+            ):
+                records_to_delete = [
+                    {
+                        "pk": pk_value,
+                        "updated_at": row_by_pk[pk_value].get("updated_at"),
+                    }
+                    for pk_value in selected_pks
+                ]
+                try:
+                    deleted = delete_records(
+                        conn, selected_table, records_to_delete, st.session_state.username
+                    )
+                    st.success(f"{deleted} registro(s) eliminado(s).")
+                    st.rerun()
+                except (ConcurrentEditError, InvalidRecordError) as exc:
+                    st.error(str(exc))
+                except Exception as exc:
+                    conn.rollback()
+                    st.error(f"No fue posible eliminar los registros: {exc}")

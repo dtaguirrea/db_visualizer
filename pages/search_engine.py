@@ -8,7 +8,7 @@ import streamlit as st
 from src.database import get_connection
 from src.documents import document_display_label, document_text_snippets
 from src.search import global_search
-from src.table_relations import document_viewer_url
+from src.table_relations import document_viewer_url, extraction_workspace_url
 
 if not st.session_state.get("logged_in"):
     st.stop()
@@ -106,7 +106,9 @@ with tab_extractions:
             f"**Extracción {int(row['extraction_id'])} · {html.escape(document_display_label(row))}**"
         )
         st.caption(
-            f"{row['element_category'] or 'Sin categoría'} · {row['review_status']} · {row['created_by']}"
+            f"{row['element_category'] or 'Sin categoría'} · "
+            f"pág. {row.get('page_number') or 'sin indicar'} · "
+            f"{row['review_status']} · {row['created_by']}"
         )
         text_value = "\n\n".join(
             value for value in [
@@ -119,8 +121,8 @@ with tab_extractions:
         for context in contexts:
             st.markdown(_highlight(context, query), unsafe_allow_html=True)
         st.link_button(
-            f"Abrir documento asociado · extracción {int(row['extraction_id'])}",
-            document_viewer_url(row["document_id"]),
+            f"Abrir en Extracción · ficha {int(row['extraction_id'])}",
+            extraction_workspace_url(row["document_id"]),
         )
         st.divider()
 

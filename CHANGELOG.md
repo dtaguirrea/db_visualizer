@@ -4,6 +4,47 @@ Este archivo registra cambios relevantes de `db_visualizer`.
 
 El proyecto utiliza versionado semántico (`MAJOR.MINOR.PATCH`).
 
+## [2.1.0] - 2026-09-04
+
+### Añadido
+- Selección de idioma OCR por documento, tanto al cargar como al editar sus metadatos.
+- Selector de documentos integrado en el Visor, manteniendo los enlaces directos desde tablas y búsquedas.
+- Acceso directo desde el Visor al espacio de Extracción del documento seleccionado.
+- Página de Extracción convertida en un flujo de fichaje de evidencias con página, categoría, información clave, cita literal, cruces y estado de revisión.
+- Métricas, filtro, edición, eliminación confirmada y exportación CSV de las fichas de cada documento.
+- Pestaña explícita para eliminar uno o varios registros de cualquier tabla personalizada.
+
+### Modificado
+- La indexación de texto usa por defecto la capa OCR del PDF de forma local, evitando la costosa llamada a `/text` de HURIDOCS.
+- Se puede elegir `local`, `huridocs` o `disabled` mediante `OCR_TEXT_EXTRACTION_MODE`.
+- Los documentos completados también pueden reprocesarse después de cambiar su idioma OCR.
+
+### Seguridad e integridad
+- La eliminación múltiple conserva auditoría y control de concurrencia.
+- Las eliminaciones se bloquean cuando otros registros todavía dependen de la selección.
+- Las migraciones agregan idioma OCR y número de página sin borrar documentos ni extracciones existentes.
+
+## [2.0.0] - 2026-09-04
+
+### Añadido
+- Cola OCR persistente con una capacidad configurable de 20 trabajos activos por defecto.
+- Carga múltiple de hasta 20 archivos PDF y procesamiento estrictamente secuencial mediante un trabajador independiente.
+- Vista de estado de la cola con documento activo, posiciones, intentos y espacios disponibles.
+- Edición de título, procedencia, fecha y formato de los documentos cargados.
+- Eliminación confirmada de documentos, extracciones asociadas y archivos PDF almacenados.
+- Recuperación automática de trabajos interrumpidos después de reiniciar el trabajador.
+
+### Corregido
+- El selector de fecha ahora permite documentos desde el 1 de enero de 1800 hasta la fecha actual.
+- La carga deja de bloquear la sesión de Streamlit mientras HURIDOCS procesa un PDF.
+- El reprocesamiento fallido vuelve al final de la cola en vez de iniciar otro OCR concurrente.
+
+### Seguridad e integridad
+- La capacidad de la cola se reserva atómicamente para cargas simultáneas.
+- PostgreSQL impide que más de un trabajador OCR consuma la cola a la vez.
+- No se permite eliminar un documento mientras está siendo procesado ni cuando una tabla personalizada lo referencia.
+- Las operaciones de cola, edición, reprocesamiento y eliminación quedan registradas en auditoría.
+
 ## [1.1.0] - 2026-08-28
 
 ### Añadido

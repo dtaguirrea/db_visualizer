@@ -32,6 +32,22 @@ OCR_USE_FAST_MODE = os.environ.get("OCR_USE_FAST_MODE", "false").lower() == "tru
 OCR_LANGUAGE = os.environ.get("OCR_LANGUAGE", "es")
 OCR_ROTATE_PAGES = os.environ.get("OCR_ROTATE_PAGES", "true").lower() == "true"
 OCR_DESKEW = os.environ.get("OCR_DESKEW", "true").lower() == "true"
+OCR_QUEUE_MAX_SIZE = max(1, int(os.environ.get("OCR_QUEUE_MAX_SIZE", "20")))
+OCR_WORKER_POLL_SECONDS = max(1, int(os.environ.get("OCR_WORKER_POLL_SECONDS", "3")))
+OCR_TEXT_EXTRACTION_MODE = os.environ.get("OCR_TEXT_EXTRACTION_MODE", "local").strip().lower()
+if OCR_TEXT_EXTRACTION_MODE not in {"local", "huridocs", "disabled"}:
+    OCR_TEXT_EXTRACTION_MODE = "local"
+
+OCR_LANGUAGE_LABELS = {
+    "es": "Español",
+    "en": "Inglés",
+    "pt": "Portugués",
+    "fr": "Francés",
+    "de": "Alemán",
+    "it": "Italiano",
+}
+if OCR_LANGUAGE not in OCR_LANGUAGE_LABELS:
+    OCR_LANGUAGE_LABELS[OCR_LANGUAGE] = f"Otro ({OCR_LANGUAGE})"
 
 BOOTSTRAP_ADMIN_USERNAME = os.environ.get("BOOTSTRAP_ADMIN_USERNAME", "admin").strip()
 BOOTSTRAP_ADMIN_FULL_NAME = os.environ.get("BOOTSTRAP_ADMIN_FULL_NAME", "Administrador").strip()

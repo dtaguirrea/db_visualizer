@@ -169,13 +169,16 @@ dashboard_page = st.Page("pages/dashboard.py", title="Inicio", default=True)
 document_viewer_page = st.Page(
     "pages/document_viewer.py", title="Visor de documento", url_path="documento"
 )
+extraction_page = st.Page(
+    "pages/extraction_form.py", title="Extracción", url_path="extraccion"
+)
 data_explorer_page = st.Page("pages/data_explorer.py", title="Tablas", url_path="tablas")
 
 pages = {
     "Proyecto": [
         dashboard_page,
         st.Page("pages/document_upload.py", title="Documentos"),
-        st.Page("pages/extraction_form.py", title="Extracción"),
+        extraction_page,
         document_viewer_page,
     ],
     "Datos": [

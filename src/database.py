@@ -53,6 +53,11 @@ def _add_document_columns_if_needed(conn: Connection) -> None:
         "original_file_path": "TEXT",
         "ocr_file_path": "TEXT",
         "ocr_error": "TEXT",
+        "queued_at": "TEXT",
+        "processing_started_at": "TEXT",
+        "processing_finished_at": "TEXT",
+        "ocr_attempts": "INTEGER NOT NULL DEFAULT 0",
+        "ocr_language": "TEXT",
     }
     for column_name, column_type in additions.items():
         if column_name not in columns:
@@ -70,6 +75,23 @@ def _add_document_columns_if_needed(conn: Connection) -> None:
         SET original_file_path = file_path
         WHERE original_file_path IS NULL AND file_path IS NOT NULL
     """))
+    conn.execute(text("""
+        UPDATE document_records
+        SET ocr_status = 'en_cola', queued_at = COALESCE(queued_at, created_at)
+        WHERE ocr_status = 'pendiente'
+    """))
+    conn.execute(text("""
+        UPDATE document_records
+        SET ocr_language = :default_language
+        WHERE ocr_language IS NULL OR TRIM(ocr_language) = ''
+    """), {"default_language": config.OCR_LANGUAGE})
+
+
+def _add_extraction_columns_if_needed(conn: Connection) -> None:
+    """Agrega campos de fichaje sin alterar extracciones existentes."""
+    columns = {c["name"] for c in inspect(conn).get_columns("extraction_records")}
+    if "page_number" not in columns:
+        conn.execute(text("ALTER TABLE extraction_records ADD COLUMN page_number INTEGER"))
 
 
 def _infer_column_type(column: dict, referred_table: str | None, candidates: list[dict]) -> str:
@@ -224,12 +246,21 @@ def init_db() -> None:
             ocr_text TEXT,
             ocr_status TEXT NOT NULL DEFAULT 'pendiente',
             ocr_error TEXT,
+            queued_at TEXT,
+            processing_started_at TEXT,
+            processing_finished_at TEXT,
+            ocr_attempts INTEGER NOT NULL DEFAULT 0,
+            ocr_language TEXT,
             created_by TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_by TEXT,
             updated_at TEXT
         )'''))
         _add_document_columns_if_needed(conn)
+        conn.execute(text('''
+            CREATE INDEX IF NOT EXISTS idx_document_records_ocr_queue
+            ON document_records(ocr_status, queued_at, document_id)
+        '''))
 
         conn.execute(text(f'''CREATE TABLE IF NOT EXISTS extraction_records (
             {_pk_sql("extraction_id")},
@@ -238,6 +269,7 @@ def init_db() -> None:
             key_information TEXT,
             literal_quote TEXT,
             cross_reference_notes TEXT,
+            page_number INTEGER,
             review_status TEXT NOT NULL DEFAULT 'Pendiente',
             created_by TEXT NOT NULL,
             created_at TEXT NOT NULL,
@@ -245,6 +277,7 @@ def init_db() -> None:
             updated_at TEXT,
             FOREIGN KEY (document_id) REFERENCES document_records(document_id) ON DELETE CASCADE
         )'''))
+        _add_extraction_columns_if_needed(conn)
 
         conn.execute(text('''CREATE TABLE IF NOT EXISTS dynamic_tables_registry (
             table_name TEXT PRIMARY KEY,

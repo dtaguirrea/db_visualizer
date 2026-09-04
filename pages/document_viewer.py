@@ -1,4 +1,4 @@
-"""Visor independiente de documentos, con descarga y búsqueda OCR."""
+"""Visor de documentos con selección directa, descarga y búsqueda OCR."""
 import html
 import re
 from pathlib import Path
@@ -6,6 +6,7 @@ from pathlib import Path
 import streamlit as st
 from sqlalchemy import text
 
+import config
 from src.database import get_connection
 from src.documents import (
     document_display_label,
@@ -14,39 +15,54 @@ from src.documents import (
     get_visible_pdf_path,
     safe_pdf_filename,
 )
+from src.table_relations import extraction_workspace_url
 
 if not st.session_state.get("logged_in"):
     st.stop()
 
-st.title("Visor de documento")
-
-raw_document_id = st.query_params.get("document_id")
-if raw_document_id is not None:
-    st.session_state.viewer_document_id = raw_document_id
-else:
-    raw_document_id = st.session_state.get("viewer_document_id")
-try:
-    document_id = int(raw_document_id) if raw_document_id is not None else None
-except (TypeError, ValueError):
-    document_id = None
-
-if document_id is None:
-    st.info("Selecciona un documento desde una tabla, el buscador o la sección Documentos.")
-    st.stop()
+st.title("Visor de documentos")
 
 with get_connection() as conn:
-    row = conn.execute(text('''
-        SELECT document_id, title, source_reference, document_date, original_format, ocr_status, ocr_error,
-               original_file_path, ocr_file_path, file_path, ocr_text,
-               created_by, created_at, updated_by, updated_at
+    rows = conn.execute(text('''
+        SELECT document_id, title, source_reference, document_date, original_format,
+               ocr_language, ocr_status, ocr_error, original_file_path, ocr_file_path,
+               file_path, ocr_text, created_by, created_at, updated_by, updated_at
         FROM document_records
-        WHERE document_id = :document_id
-    '''), {"document_id": document_id}).mappings().first()
+        ORDER BY document_id DESC
+    ''')).mappings().all()
 
-document = dict(row) if row is not None else None
-if document is None:
-    st.error("El documento solicitado no existe.")
+documents = [dict(row) for row in rows]
+if not documents:
+    st.info("Todavía no hay documentos cargados.")
     st.stop()
+
+document_by_id = {int(document["document_id"]): document for document in documents}
+document_ids = list(document_by_id)
+raw_document_id = st.query_params.get("document_id")
+try:
+    requested_id = int(raw_document_id) if raw_document_id is not None else None
+except (TypeError, ValueError):
+    requested_id = None
+
+selection_key = "viewer_document_selection"
+last_query_key = "viewer_last_query_document_id"
+if requested_id in document_by_id and st.session_state.get(last_query_key) != requested_id:
+    st.session_state[selection_key] = requested_id
+    st.session_state[last_query_key] = requested_id
+elif st.session_state.get(selection_key) not in document_by_id:
+    st.session_state[selection_key] = document_ids[0]
+
+document_id = st.selectbox(
+    "Documento que deseas visualizar",
+    options=document_ids,
+    key=selection_key,
+    format_func=lambda value: document_display_label(document_by_id[value]),
+)
+if requested_id != document_id:
+    st.query_params["document_id"] = str(document_id)
+    st.session_state[last_query_key] = document_id
+st.session_state.viewer_document_id = document_id
+document = document_by_id[document_id]
 
 st.subheader(document_display_label(document))
 metadata_parts = []
@@ -56,6 +72,7 @@ if document.get("document_date"):
     metadata_parts.append(f"Fecha: {document['document_date']}")
 metadata_parts.extend([
     document.get("original_format") or "Formato no indicado",
+    f"Idioma OCR: {config.OCR_LANGUAGE_LABELS.get(document.get('ocr_language'), document.get('ocr_language'))}",
     f"OCR: {document['ocr_status']}",
     f"Cargado por {document['created_by']}",
 ])
@@ -67,7 +84,7 @@ if not pdf_path or not Path(pdf_path).is_file():
     st.stop()
 
 ocr_pdf_path = get_ocr_pdf_path(document)
-col_download, col_original, _ = st.columns([1.35, 1.15, 4])
+col_download, col_original, col_extract, _ = st.columns([1.35, 1.15, 1.3, 3])
 
 with col_download:
     if ocr_pdf_path:
@@ -76,7 +93,9 @@ with col_download:
                 "Descargar PDF con OCR",
                 data=pdf_file,
                 file_name=safe_pdf_filename(
-                    document["document_id"], document.get("title") or document.get("source_reference"), ocr=True
+                    document["document_id"],
+                    document.get("title") or document.get("source_reference"),
+                    ocr=True,
                 ),
                 mime="application/pdf",
                 type="primary",
@@ -100,13 +119,22 @@ with col_original:
                 "Descargar original",
                 data=original_file,
                 file_name=safe_pdf_filename(
-                    document["document_id"], document.get("title") or document.get("source_reference"), ocr=False
+                    document["document_id"],
+                    document.get("title") or document.get("source_reference"),
+                    ocr=False,
                 ),
                 mime="application/pdf",
                 use_container_width=True,
                 key=f"download_original_{document_id}",
                 on_click="ignore",
             )
+
+with col_extract:
+    st.link_button(
+        "Crear ficha de extracción",
+        extraction_workspace_url(document_id),
+        use_container_width=True,
+    )
 
 if ocr_pdf_path:
     st.caption("Se muestra la copia PDF con capa de texto OCR.")
@@ -143,9 +171,6 @@ with st.expander("Buscar en este documento", expanded=False):
         elif document.get("ocr_text"):
             st.info("No se encontraron coincidencias en el texto indexado.")
         else:
-            st.info(
-                "Este PDF puede tener capa OCR, pero todavía no hay texto indexado para la búsqueda interna. "
-                "Reprocesa la indexación desde Documentos."
-            )
+            st.info("Este PDF no contiene texto indexado para la búsqueda interna.")
 
 st.pdf(pdf_path, height=900, key=f"pdf_viewer_{document_id}")

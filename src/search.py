@@ -79,7 +79,8 @@ def search_extractions(conn: Connection, query: str, limit: int | None = None) -
     pattern = _like_pattern(query)
     operator = "ILIKE" if is_postgres(conn) else "LIKE"
     sql = f'''
-        SELECT e.extraction_id, e.document_id, e.element_category, e.key_information,
+        SELECT e.extraction_id, e.document_id, e.page_number,
+               e.element_category, e.key_information,
                e.literal_quote, e.cross_reference_notes, e.review_status,
                e.created_by, e.created_at, d.title, d.source_reference, d.document_date
         FROM extraction_records e

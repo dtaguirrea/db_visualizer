@@ -85,3 +85,10 @@ def document_viewer_url(document_id) -> str | None:
     if text_id.endswith(".0") and text_id[:-2].isdigit():
         text_id = text_id[:-2]
     return f"/documento?document_id={text_id}"
+
+
+def extraction_workspace_url(document_id) -> str | None:
+    viewer_url = document_viewer_url(document_id)
+    if viewer_url is None:
+        return None
+    return viewer_url.replace("/documento?", "/extraccion?")

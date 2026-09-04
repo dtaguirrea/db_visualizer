@@ -2,6 +2,7 @@
 from pathlib import Path
 import os
 import requests
+from pypdf import PdfReader
 
 import config
 
@@ -36,10 +37,10 @@ def _post_pdf(endpoint: str, file_path: str, data: dict):
     return response
 
 
-def create_searchable_pdf(input_path: str, output_path: str) -> str:
+def create_searchable_pdf(input_path: str, output_path: str, language: str | None = None) -> str:
     """Genera un PDF buscable con capa de texto mediante POST /ocr."""
     response = _post_pdf("/ocr", input_path, {
-        "language": config.OCR_LANGUAGE,
+        "language": language or config.OCR_LANGUAGE,
         "rotate_pages": str(config.OCR_ROTATE_PAGES).lower(),
         "deskew": str(config.OCR_DESKEW).lower(),
     })
@@ -77,9 +78,29 @@ def extract_text_from_pdf(file_path: str) -> str:
     )
 
 
-def process_pdf(input_path: str, output_path: str) -> tuple[str, str]:
-    searchable_pdf = create_searchable_pdf(input_path, output_path)
-    extracted_text = extract_text_from_pdf(searchable_pdf)
+def extract_text_locally(file_path: str) -> str:
+    """Lee la capa de texto del PDF OCR sin ejecutar análisis de layout remoto."""
+    reader = PdfReader(file_path)
+    pages = []
+    for page in reader.pages:
+        page_text = (page.extract_text() or "").strip()
+        if page_text:
+            pages.append(page_text)
+    return "\n\n".join(pages)
+
+
+def process_pdf(
+    input_path: str,
+    output_path: str,
+    language: str | None = None,
+) -> tuple[str, str]:
+    searchable_pdf = create_searchable_pdf(input_path, output_path, language=language)
+    if config.OCR_TEXT_EXTRACTION_MODE == "disabled":
+        extracted_text = ""
+    elif config.OCR_TEXT_EXTRACTION_MODE == "huridocs":
+        extracted_text = extract_text_from_pdf(searchable_pdf)
+    else:
+        extracted_text = extract_text_locally(searchable_pdf)
     return searchable_pdf, extracted_text
 
 
