@@ -20,17 +20,30 @@ def _like_pattern(query: str) -> str:
     return f"%{escaped}%"
 
 
-def search_documents(conn: Connection, query: str, limit: int | None = None) -> list[dict]:
+def search_documents(conn: Connection, query: str, limit: int | None = None,
+                     *, author: str = "", date_from=None, date_to=None) -> list[dict]:
+    from src.document_service import normalize_document_date
+    date_from = normalize_document_date(date_from)
+    date_to = normalize_document_date(date_to)
+    if date_from and date_to and date_from > date_to:
+        raise ValueError("La fecha inicial no puede ser posterior a la final.")
     query = (query or "").strip()
-    if not query:
+    author = (author or "").strip()
+    if not (query or author or date_from or date_to):
         return []
     limit = limit or config.SEARCH_RESULT_LIMIT
     params = {"query": query, "pattern": _like_pattern(query), "limit": limit}
+    params.update(author=_like_pattern(author), date_from=date_from, date_to=date_to)
 
     common_select = '''
-        SELECT document_id, title, source_reference, document_date, original_format,
+        SELECT document_id, title, author, source_reference, document_date, original_format,
                ocr_status, ocr_text, created_by, created_at
-        FROM document_records
+        FROM (
+            SELECT * FROM document_records
+            WHERE LOWER(COALESCE(author, '')) LIKE LOWER(:author) ESCAPE '\\'
+              AND (CAST(:date_from AS TEXT) IS NULL OR document_date >= :date_from)
+              AND (CAST(:date_to AS TEXT) IS NULL OR document_date <= :date_to)
+        ) AS filtered_documents
     '''
     if is_postgres(conn):
         rows = conn.execute(text(common_select + '''
@@ -44,6 +57,7 @@ def search_documents(conn: Connection, query: str, limit: int | None = None) -> 
                     COALESCE(ocr_text, '')
                 ) @@ websearch_to_tsquery('spanish', :query)
                 OR LOWER(COALESCE(title, '')) LIKE LOWER(:pattern) ESCAPE '\\'
+                OR LOWER(COALESCE(author, '')) LIKE LOWER(:pattern) ESCAPE '\\'
                 OR LOWER(COALESCE(source_reference, '')) LIKE LOWER(:pattern) ESCAPE '\\'
                 OR LOWER(COALESCE(document_date, '')) LIKE LOWER(:pattern) ESCAPE '\\'
                 OR LOWER(COALESCE(original_format, '')) LIKE LOWER(:pattern) ESCAPE '\\'
@@ -61,6 +75,7 @@ def search_documents(conn: Connection, query: str, limit: int | None = None) -> 
         rows = conn.execute(text(common_select + '''
             WHERE
                 LOWER(COALESCE(title, '')) LIKE LOWER(:pattern) ESCAPE '\\'
+                OR LOWER(COALESCE(author, '')) LIKE LOWER(:pattern) ESCAPE '\\'
                 OR LOWER(COALESCE(source_reference, '')) LIKE LOWER(:pattern) ESCAPE '\\'
                 OR LOWER(COALESCE(document_date, '')) LIKE LOWER(:pattern) ESCAPE '\\'
                 OR LOWER(COALESCE(original_format, '')) LIKE LOWER(:pattern) ESCAPE '\\'

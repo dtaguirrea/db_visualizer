@@ -2,7 +2,33 @@
 
 **db_visualizer** es una plataforma colaborativa para gestión documental y estructuración de datos. Permite trabajar con documentos PDF, aplicar OCR, consultar el texto reconocido, organizar información en tablas relacionales y mantener trazabilidad sobre las modificaciones realizadas por los usuarios.
 
-**Versión estable actual:** `2.1.0`
+**Versión actual:** `2.2.0`
+
+### Actualización por ZIP a 2.2.0
+
+Haz un respaldo de PostgreSQL y los PDFs antes de actualizar. Detén los servicios
+con `docker compose down` (sin `-v`). Extrae el ZIP en una carpeta temporal y copia
+su contenido sobre la carpeta actual del proyecto: no borres ni renombres tu carpeta
+de trabajo, y conserva `.git`, `.env` y cualquier configuración local personalizada.
+El ZIP no contiene historial Git ni secretos. Ejecuta `docker compose up --build -d`.
+La migración agrega `author` opcional sin borrar documentos ni tablas existentes.
+
+Autor del documento es una persona o institución, no el usuario que subió el PDF.
+Puedes buscar por autor, fechas o ambos sin escribir texto. Estos filtros limitan
+los resultados a documentos y se combinan con el texto mediante AND. Para un día
+exacto, usa la misma fecha en Desde y Hasta; para un año, usa enero 1 a diciembre 31.
+Las fechas representan la fecha del documento/autoría, no la fecha de carga.
+El editor de fechas de tablas admite desde 1800; en Documentos también puedes
+escribir directamente una fecha completa en el selector.
+
+### Diagnóstico de portugués
+
+El cliente envía `pt`, que HURIDOCS traduce a `por` para Tesseract.
+Si falla, ejecuta `docker compose exec ocr_service tesseract --list-langs` y
+`docker compose logs --tail 150 ocr_service ocr_worker`. La lista debe incluir `por`.
+No se cambia automáticamente a otro idioma, ni se afirma que falte el paquete sin
+verificarlo. Comparte el error para distinguir un idioma ausente de un timeout,
+un problema del PDF o del servicio. No borres los volúmenes para solucionar OCR.
 
 La interfaz de usuario está en español. Los identificadores del código y la configuración técnica utilizan nombres en inglés cuando corresponde.
 

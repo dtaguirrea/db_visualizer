@@ -4,6 +4,14 @@ Este archivo registra cambios relevantes de `db_visualizer`.
 
 El proyecto utiliza versionado semántico (`MAJOR.MINOR.PATCH`).
 
+## [2.2.0] - 2026-09-09
+
+- Autor opcional en documentos, independiente del usuario responsable de la carga.
+- Búsqueda por autor y rango de fechas, con texto opcional.
+- Editor de fechas en tablas personalizadas con mínimo explícito 1800.
+- Diagnóstico adicional para errores OCR en portugués; se conserva el código correcto pt.
+- Migración aditiva: los documentos existentes conservan sus datos y autor queda vacío.
+
 ## [2.1.0] - 2026-09-04
 
 ### Añadido

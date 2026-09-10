@@ -122,19 +122,20 @@ def enqueue_documents(records: Iterable[dict], username: str) -> list[int]:
                 document_date = normalize_document_date(item.get("document_date"))
                 result = conn.execute(text('''
                     INSERT INTO document_records (
-                        title, source_reference, document_date, original_format,
+                        title, author, source_reference, document_date, original_format,
                         file_path, original_file_path, ocr_file_path, ocr_text,
                         ocr_status, ocr_error, queued_at, processing_started_at,
                         processing_finished_at, ocr_attempts,
                         ocr_language, created_by, created_at, updated_by, updated_at
                     ) VALUES (
-                        :title, :source_reference, :document_date, :original_format,
+                        :title, :author, :source_reference, :document_date, :original_format,
                         :original_file_path, :original_file_path, NULL, '',
                         'en_cola', NULL, :queued_at, NULL, NULL, 0, :ocr_language,
                         :created_by, :created_at, :updated_by, :updated_at
                     ) RETURNING document_id
                 '''), {
                     "title": (item.get("title") or "").strip() or None,
+                    "author": (item.get("author") or "").strip() or None,
                     "source_reference": (item.get("source_reference") or "").strip() or None,
                     "document_date": document_date,
                     "original_format": item.get("original_format"),
@@ -402,6 +403,7 @@ def update_document_metadata(
     ocr_language: str | None,
     username: str,
     expected_updated_at: str | None,
+    author: str | None = None,
 ) -> None:
     normalized_date = normalize_document_date(document_date)
     with get_connection() as conn:
@@ -413,13 +415,14 @@ def update_document_metadata(
             )
             result = conn.execute(text(f'''
                 UPDATE document_records
-                SET title = :title, source_reference = :source_reference,
+                SET title = :title, author = :author, source_reference = :source_reference,
                     document_date = :document_date, original_format = :original_format,
                     ocr_language = :ocr_language,
                     updated_by = :updated_by, updated_at = :updated_at
                 WHERE document_id = :document_id AND {concurrency_clause}
             '''), {
                 "title": (title or "").strip() or None,
+                "author": (author or "").strip() or None,
                 "source_reference": (source_reference or "").strip() or None,
                 "document_date": normalized_date,
                 "original_format": original_format,
@@ -442,7 +445,7 @@ def update_document_metadata(
                 conn, "document_records", document_id, "UPDATE", username,
                 details={
                     "columns": [
-                        "title", "source_reference", "document_date", "original_format", "ocr_language"
+                        "title", "author", "source_reference", "document_date", "original_format", "ocr_language"
                     ]
                 },
             )

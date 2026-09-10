@@ -32,6 +32,12 @@ def _post_pdf(endpoint: str, file_path: str, data: dict):
 
     if response.status_code != 200:
         detail = response.text[:400].strip()
+        if endpoint == "/ocr" and data.get("language") == "pt":
+            detail += (
+                " Portugués se envía como pt (código correcto de HURIDOCS). "
+                "Comprueba que tesseract --list-langs en ocr_service incluya por; "
+                "si está instalado, revisa los logs del servicio para identificar la causa."
+            )
         suffix = f" Detalle: {detail}" if detail else ""
         raise OcrServiceError(f"El servicio OCR respondió con código {response.status_code}.{suffix}")
     return response

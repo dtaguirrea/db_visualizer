@@ -1,5 +1,6 @@
 """Búsqueda global en OCR, extracciones y tablas personalizadas."""
 import html
+from datetime import date
 import re
 from urllib.parse import quote
 
@@ -7,7 +8,7 @@ import streamlit as st
 
 from src.database import get_connection
 from src.documents import document_display_label, document_text_snippets
-from src.search import global_search
+from src.search import global_search, search_documents
 from src.table_relations import document_viewer_url, extraction_workspace_url
 
 if not st.session_state.get("logged_in"):
@@ -36,18 +37,32 @@ def _highlight(value: str | None, query: str) -> str:
 
 with st.form("search_form"):
     query_text = st.text_input("Texto", placeholder="Palabra o frase")
+    author_filter = st.text_input("Autor del documento (opcional)")
+    left, right = st.columns(2)
+    date_from = left.date_input("Fecha de autoría desde (opcional)", value=None,
+                                min_value=date(1800, 1, 1), max_value=date.today())
+    date_to = right.date_input("Fecha de autoría hasta (opcional)", value=None,
+                              min_value=date(1800, 1, 1), max_value=date.today())
+    st.caption("Autor y fechas filtran documentos. Puedes dejar Texto vacío; usa ambas fechas iguales para un día exacto.")
     submitted = st.form_submit_button("Buscar", type="primary")
 
 if submitted:
     st.session_state["global_search_query"] = query_text.strip()
+    st.session_state["document_search_filters"] = dict(
+        author=author_filter.strip(), date_from=date_from, date_to=date_to)
 
 query = st.session_state.get("global_search_query", "").strip()
-if not query:
+filters = st.session_state.get("document_search_filters", {})
+if not query and not any(filters.values()):
     st.stop()
 
 with get_connection() as conn:
     try:
-        results = global_search(conn, query)
+        if any(filters.values()):
+            results = {"documents": search_documents(conn, query, **filters),
+                       "extractions": [], "tables": []}
+        else:
+            results = global_search(conn, query)
     except Exception as exc:
         st.error(f"No fue posible ejecutar la búsqueda: {exc}")
         st.stop()
@@ -78,6 +93,7 @@ with tab_documents:
     for row in documents:
         st.markdown(f"**{html.escape(document_display_label(row))}**")
         st.caption(
+            f"Autor: {row.get('author') or 'Sin indicar'} · "
             f"{row['original_format'] or 'Formato no indicado'} · OCR: {row['ocr_status']} · "
             f"{row['created_by']}"
         )

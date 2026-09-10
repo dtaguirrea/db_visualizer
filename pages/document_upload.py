@@ -87,6 +87,7 @@ with st.form("document_upload_form", clear_on_submit=True):
         "recibe como título el nombre de su archivo y luego puedes editarlo."
     )
     title = st.text_input("Título o nombre", placeholder="Opcional")
+    author = st.text_input("Autor del documento", placeholder="Opcional; persona o institución")
     col1, col2 = st.columns(2)
     with col1:
         source_reference = st.text_input("Origen o procedencia", placeholder="Opcional")
@@ -142,6 +143,7 @@ if submitted:
                 records.append({
                     "title": (title.strip() or inferred_title) if len(uploaded_pdfs) == 1 else inferred_title,
                     "source_reference": source_reference,
+                    "author": author,
                     "document_date": document_date,
                     "original_format": original_format,
                     "ocr_language": ocr_language,
@@ -171,7 +173,7 @@ st.divider()
 st.subheader("Documentos cargados")
 with get_connection() as conn:
     documents = pd.read_sql_query(text('''
-        SELECT document_id, title, source_reference, document_date, original_format,
+        SELECT document_id, title, author, source_reference, document_date, original_format,
                ocr_language, ocr_status, ocr_error, original_file_path, ocr_file_path,
                created_by, created_at, updated_by, updated_at
         FROM document_records
@@ -183,11 +185,11 @@ if documents.empty:
     st.stop()
 
 display = documents[[
-    "document_id", "title", "source_reference", "document_date",
+    "document_id", "title", "author", "source_reference", "document_date",
     "original_format", "ocr_language", "ocr_status", "created_by", "created_at",
 ]].copy()
 display.columns = [
-    "ID", "Título", "Origen", "Fecha", "Formato", "Idioma", "OCR", "Creado por", "Creado el",
+    "ID", "Título", "Autor", "Origen", "Fecha", "Formato", "Idioma", "OCR", "Creado por", "Creado el",
 ]
 display["Idioma"] = display["Idioma"].map(config.OCR_LANGUAGE_LABELS).fillna(display["Idioma"])
 display["OCR"] = display["OCR"].map(STATUS_LABELS).fillna(display["OCR"])
@@ -219,6 +221,7 @@ with st.expander("Editar datos del documento"):
 
     with st.form(f"edit_document_{selected_edit_id}"):
         edit_title = st.text_input("Título o nombre", value=_text_or_empty(selected_edit["title"]))
+        edit_author = st.text_input("Autor del documento", value=_text_or_empty(selected_edit["author"]))
         edit_source = st.text_input(
             "Origen o procedencia", value=_text_or_empty(selected_edit["source_reference"])
         )
@@ -255,6 +258,7 @@ with st.expander("Editar datos del documento"):
             update_document_metadata(
                 selected_edit_id,
                 title=edit_title,
+                author=edit_author,
                 source_reference=edit_source,
                 document_date=edit_date,
                 original_format=edit_format,

@@ -48,6 +48,7 @@ def _add_document_columns_if_needed(conn: Connection) -> None:
     """Migra document_records sin eliminar datos de instalaciones anteriores."""
     columns = {c["name"] for c in inspect(conn).get_columns("document_records")}
     additions = {
+        "author": "TEXT",
         "title": "TEXT",
         "document_date": "TEXT",
         "original_file_path": "TEXT",

@@ -24,7 +24,7 @@ st.title("Visor de documentos")
 
 with get_connection() as conn:
     rows = conn.execute(text('''
-        SELECT document_id, title, source_reference, document_date, original_format,
+        SELECT document_id, title, author, source_reference, document_date, original_format,
                ocr_language, ocr_status, ocr_error, original_file_path, ocr_file_path,
                file_path, ocr_text, created_by, created_at, updated_by, updated_at
         FROM document_records
@@ -66,6 +66,8 @@ document = document_by_id[document_id]
 
 st.subheader(document_display_label(document))
 metadata_parts = []
+if document.get("author"):
+    metadata_parts.append(f"Autor: {document['author']}")
 if document.get("source_reference"):
     metadata_parts.append(f"Origen: {document['source_reference']}")
 if document.get("document_date"):

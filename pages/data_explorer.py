@@ -1,5 +1,6 @@
 """Edición de tablas personalizadas con relaciones y trazabilidad."""
 import pandas as pd
+from datetime import date
 import streamlit as st
 from sqlalchemy import text
 
@@ -90,6 +91,16 @@ with get_connection() as conn:
                 options=[""] + list(relation["reverse"].keys()),
                 help=f"Relacionado con {relation['referred_table']}",
             )
+
+        for column in metadata:
+            name = column["column_name"]
+            if column["column_type"] == "Fecha" and name in display_df:
+                display_df[name] = display_df[name].map(
+                    lambda value: None if pd.isna(value) or value == "" else date.fromisoformat(str(value)[:10])
+                )
+                column_config[name] = st.column_config.DateColumn(
+                    name, min_value=date(1800, 1, 1), max_value=date.today(), format="YYYY-MM-DD"
+                )
 
         edited_display_df = st.data_editor(
             display_df,

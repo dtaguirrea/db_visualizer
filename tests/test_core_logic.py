@@ -60,6 +60,7 @@ from src.dynamic_tables import InvalidIdentifierError, create_dynamic_table, dro
 from src.ocr_client import extract_text_locally
 from src.repository import ConcurrentEditError, delete_records, insert_record, sync_table_edits
 from src.search import global_search
+from src.search import search_documents
 from src.table_relations import (
     document_viewer_url,
     extraction_workspace_url,
@@ -481,3 +482,90 @@ def test_v2_1_local_pdf_text_extraction():
         writer.write(output)
     assert extract_text_locally(str(pdf_path)) == ""
     pdf_path.unlink(missing_ok=True)
+
+
+def test_v2_2_author_and_date_filters():
+    init_db()
+    ids = enqueue_documents([
+        {"title": "Historia", "author": "Maria Silva", "document_date": "1800-01-01",
+         "original_file_path": "/tmp/author_fixture.pdf"},
+        {"title": "Historia", "author": None, "document_date": "1900-01-01",
+         "original_file_path": "/tmp/anonymous_fixture.pdf"},
+    ], "admin")
+    with get_connection() as conn:
+        assert [r["document_id"] for r in search_documents(conn, "", author="silva")] == [ids[0]]
+        assert [r["document_id"] for r in search_documents(conn, "Maria")] == [ids[0]]
+        assert [r["document_id"] for r in search_documents(
+            conn, "", date_from="1800-01-01", date_to="1800-01-01")] == [ids[0]]
+        assert search_documents(conn, "", author="silva", date_from="1900-01-01") == []
+        assert search_documents(conn, "", author="%") == []
+        assert search_documents(conn, "no coincide", author="silva") == []
+        assert search_documents(conn, "") == []
+        import pytest
+        with pytest.raises(ValueError):
+            search_documents(conn, "", date_from="1900-01-01", date_to="1800-01-01")
+        row = conn.execute(text("SELECT * FROM document_records WHERE document_id=:id"),
+                           {"id": ids[0]}).mappings().one()
+    update_document_metadata(ids[0], title=row["title"], source_reference=None,
+        document_date=row["document_date"], original_format=None, ocr_language="pt",
+        author="Joao", username="admin", expected_updated_at=row["updated_at"])
+    init_db()
+    with get_connection() as conn:
+        assert search_documents(conn, "", author="Joao")[0]["document_id"] == ids[0]
+        assert conn.execute(text("SELECT author FROM document_records WHERE document_id=:id"),
+                            {"id": ids[1]}).scalar_one() is None
+
+
+def test_v2_2_portuguese_request_and_error(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from src.ocr_client import create_searchable_pdf, OcrServiceError
+    import pytest
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"%PDF-1.4")
+    received = []
+    def post(url, **kwargs):
+        received.append(kwargs["data"])
+        return SimpleNamespace(status_code=200, content=b"%PDF-1.4", text="")
+    monkeypatch.setattr("src.ocr_client.requests.post", post)
+    create_searchable_pdf(str(source), str(tmp_path / "output.pdf"), language="pt")
+    assert received[0]["language"] == "pt"
+    monkeypatch.setattr("src.ocr_client.requests.post", lambda *a, **kw:
+        SimpleNamespace(status_code=500, text="missing language data"))
+    with pytest.raises(OcrServiceError, match="tesseract --list-langs"):
+        create_searchable_pdf(str(source), str(tmp_path / "error.pdf"), language="pt")
+    assert not (tmp_path / "error.pdf").exists()
+
+
+def test_v2_2_ui_dates_and_author(tmp_path):
+    from streamlit.testing.v1 import AppTest
+    init_db()
+    pdf = tmp_path / "ui.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=300, height=300)
+    with pdf.open("wb") as output:
+        writer.write(output)
+    with get_connection() as conn:
+        conn.execute(text("UPDATE document_records SET original_file_path=:path, file_path=:path"),
+                     {"path": str(pdf)})
+        conn.commit()
+        table = create_dynamic_table(conn, "historical_dates",
+            [{"name": "fecha_autoria", "type": "Fecha", "foreign_key_table": None}],
+            "Fechas históricas", "admin")
+        insert_record(conn, table, {"fecha_autoria": "1800-01-01"}, "admin")
+    for page in ("document_upload", "document_viewer", "data_explorer", "search_engine"):
+        app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "pages" / f"{page}.py"))
+        app.session_state["logged_in"] = True
+        app.session_state["username"] = "admin"
+        if page == "data_explorer":
+            app.query_params["table"] = table
+        app.run(timeout=20)
+        assert not app.exception, str(app.exception)
+        if page == "document_upload":
+            assert all(item.min == date(1800, 1, 1) for item in app.date_input)
+            app.date_input[0].set_value(date(1800, 1, 1)).run()
+            assert not app.exception
+        if page == "search_engine":
+            app.text_input[1].set_value("Joao")
+            app.button[0].click().run()
+            assert not app.exception
+            assert any("Autor: Joao" in item.value for item in app.caption)
