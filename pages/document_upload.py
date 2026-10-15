@@ -8,6 +8,7 @@ import streamlit as st
 from sqlalchemy import text
 
 import config
+from src.field_values import DATE_HELP
 from src.database import get_connection
 from src.document_service import (
     ConcurrentDocumentEditError,
@@ -23,6 +24,7 @@ from src.document_service import (
 )
 from src.documents import document_display_label
 from src.table_relations import document_viewer_url
+from src.navigation import open_document
 
 if not st.session_state.get("logged_in"):
     st.stop()
@@ -92,13 +94,8 @@ with st.form("document_upload_form", clear_on_submit=True):
     with col1:
         source_reference = st.text_input("Origen o procedencia", placeholder="Opcional")
     with col2:
-        document_date = st.date_input(
-            "Fecha del documento",
-            value=None,
-            min_value=date(1800, 1, 1),
-            max_value=date.today(),
-            format="YYYY-MM-DD",
-        )
+        document_date = st.text_input('Fecha del documento', placeholder='1950 / 1950-06 / 1950-06-12', help=DATE_HELP)
+
 
     col3, col4, col5 = st.columns([1, 1, 2])
     with col3:
@@ -174,7 +171,7 @@ st.subheader("Documentos cargados")
 with get_connection() as conn:
     documents = pd.read_sql_query(text('''
         SELECT document_id, title, author, source_reference, document_date, original_format,
-               ocr_language, ocr_status, ocr_error, original_file_path, ocr_file_path,
+               physical_location, ocr_language, ocr_status, ocr_error, original_file_path, ocr_file_path,
                created_by, created_at, updated_by, updated_at
         FROM document_records
         ORDER BY document_id DESC
@@ -193,45 +190,45 @@ display.columns = [
 ]
 display["Idioma"] = display["Idioma"].map(config.OCR_LANGUAGE_LABELS).fillna(display["Idioma"])
 display["OCR"] = display["OCR"].map(STATUS_LABELS).fillna(display["OCR"])
-display["Abrir"] = documents["document_id"].map(document_viewer_url)
-st.dataframe(
+st.caption("Selecciona una fila para abrir ese documento en esta misma pestaña.")
+selection = st.dataframe(
     display,
     use_container_width=True,
     hide_index=True,
-    column_config={
-        "Abrir": st.column_config.LinkColumn("Abrir", display_text="Abrir documento"),
-    },
+    on_select="rerun", selection_mode="single-row", key="document_list",
 )
+if selection.selection.rows:
+    selected_position = selection.selection.rows[0]
+    if st.button("Abrir documento seleccionado", type="primary"):
+        open_document(int(documents.iloc[selected_position]["document_id"]))
 
 labels = {
-    document_display_label(row): int(row["document_id"])
+    int(row["document_id"]): document_display_label(row)
     for row in documents.to_dict("records")
 }
 
 with st.expander("Editar datos del documento"):
-    selected_edit_label = st.selectbox("Documento", list(labels), key="edit_document_select")
-    selected_edit_id = labels[selected_edit_label]
+    selected_edit_id = st.selectbox("Documento", list(labels), format_func=labels.get, key="edit_document_select")
     selected_edit = documents[documents["document_id"] == selected_edit_id].iloc[0]
-    stored_date = None
-    if pd.notna(selected_edit["document_date"]) and str(selected_edit["document_date"]).strip():
-        try:
-            stored_date = date.fromisoformat(str(selected_edit["document_date"]))
-        except ValueError:
-            st.warning("La fecha almacenada no es válida. Selecciona una nueva fecha para corregirla.")
+    snapshot_key = f'document_edit_snapshot_{selected_edit_id}'
+    if snapshot_key not in st.session_state:
+        st.session_state[snapshot_key] = selected_edit.to_dict()
+    selected_edit = st.session_state[snapshot_key]
+    if st.button('Recargar metadatos', key=f'reload_document_{selected_edit_id}'):
+        st.session_state.pop(snapshot_key, None)
+        st.session_state[f'document_generation_{selected_edit_id}'] = st.session_state.get(f'document_generation_{selected_edit_id}', 0) + 1
+        st.rerun()
+    generation = st.session_state.get(f'document_generation_{selected_edit_id}', 0)
 
-    with st.form(f"edit_document_{selected_edit_id}"):
+    with st.form(f"edit_document_{selected_edit_id}_{generation}"):
+        edit_location = st.text_input("Localización física (archivo, fondo, caja, carpeta o signatura)",
+            value=_text_or_empty(selected_edit["physical_location"]))
         edit_title = st.text_input("Título o nombre", value=_text_or_empty(selected_edit["title"]))
         edit_author = st.text_input("Autor del documento", value=_text_or_empty(selected_edit["author"]))
         edit_source = st.text_input(
             "Origen o procedencia", value=_text_or_empty(selected_edit["source_reference"])
         )
-        edit_date = st.date_input(
-            "Fecha del documento",
-            value=stored_date,
-            min_value=date(1800, 1, 1),
-            max_value=date.today(),
-            format="YYYY-MM-DD",
-        )
+        edit_date = st.text_input('Fecha del documento', value=_text_or_empty(selected_edit['document_date']), help=DATE_HELP)
         current_format = _text_or_empty(selected_edit["original_format"])
         format_options = list(ORIGINAL_FORMATS)
         if current_format and current_format not in format_options:
@@ -259,6 +256,7 @@ with st.expander("Editar datos del documento"):
                 selected_edit_id,
                 title=edit_title,
                 author=edit_author,
+                physical_location=edit_location,
                 source_reference=edit_source,
                 document_date=edit_date,
                 original_format=edit_format,
@@ -268,6 +266,8 @@ with st.expander("Editar datos del documento"):
                     None if pd.isna(selected_edit["updated_at"]) else str(selected_edit["updated_at"])
                 ),
             )
+            st.session_state.pop(snapshot_key, None)
+            st.session_state[f'document_generation_{selected_edit_id}'] = generation + 1
             st.success("Datos del documento actualizados.")
             st.rerun()
         except (InvalidDocumentDate, ConcurrentDocumentEditError, DocumentServiceError) as exc:
@@ -301,8 +301,7 @@ with st.expander("Eliminar documento"):
         "Esta acción elimina el registro, sus extracciones asociadas y los archivos PDF del servidor. "
         "No se puede deshacer."
     )
-    selected_delete_label = st.selectbox("Documento", list(labels), key="delete_document_select")
-    selected_delete_id = labels[selected_delete_label]
+    selected_delete_id = st.selectbox("Documento", list(labels), format_func=labels.get, key="delete_document_select")
     selected_delete = documents[documents["document_id"] == selected_delete_id].iloc[0]
     busy = selected_delete["ocr_status"] == "procesando"
     if busy:

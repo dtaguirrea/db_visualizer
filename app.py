@@ -1,5 +1,6 @@
 """Entrada principal de db_visualizer."""
 import streamlit as st
+from src.session_state import clear_user_state
 from streamlit_cookies_controller import CookieController
 
 import config
@@ -13,6 +14,7 @@ from src.auth import (
 )
 from src.database import init_db
 from src.ui import apply_ui
+from src.navigation import register_pages
 
 st.set_page_config(
     page_title=f"{config.APP_NAME} · {config.APP_VERSION}",
@@ -20,8 +22,13 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 apply_ui()
-init_db()
-bootstrap_admin_if_empty()
+@st.cache_resource
+def initialize_application():
+    init_db()
+    bootstrap_admin_if_empty()
+
+
+initialize_application()
 
 HIDE_SIDEBAR_CSS = "<style>[data-testid='stSidebar']{display:none;}</style>"
 
@@ -112,13 +119,19 @@ if st.session_state.logged_in:
     active_user = authenticate_session(active_token) if active_token else None
     if active_user is None:
         _remove_browser_token()
-        for key, value in SESSION_DEFAULTS.items():
-            st.session_state[key] = value
+        clear_user_state(st.session_state, SESSION_DEFAULTS)
         st.rerun()
     else:
         _apply_user(active_user, active_token)
 
+# Registrar SIEMPRE las rutas, incluso cuando el usuario debe iniciar sesión.
+# Ninguna página se ejecuta hasta superar las verificaciones de autenticación.
+incoming_params = st.query_params.to_dict()
+current_page = register_pages()
+
 if not st.session_state.logged_in:
+    if incoming_params or "login_return_to" not in st.session_state:
+        st.session_state["login_return_to"] = (current_page, incoming_params)
     st.markdown(HIDE_SIDEBAR_CSS, unsafe_allow_html=True)
     _, center, _ = st.columns([1, 1.15, 1])
     with center:
@@ -162,35 +175,12 @@ if st.session_state.must_change_password:
                     st.rerun()
     st.stop()
 
-# Navegación fija. Los enlaces /documento?... funcionan directamente. Además se
-# mantiene compatibilidad con enlaces antiguos en la raíz: /?document_id=...
-# y /?table=....
-dashboard_page = st.Page("pages/dashboard.py", title="Inicio", default=True)
-document_viewer_page = st.Page(
-    "pages/document_viewer.py", title="Visor de documento", url_path="documento"
-)
-extraction_page = st.Page(
-    "pages/extraction_form.py", title="Extracción", url_path="extraccion"
-)
-data_explorer_page = st.Page("pages/data_explorer.py", title="Tablas", url_path="tablas")
-
-pages = {
-    "Proyecto": [
-        dashboard_page,
-        st.Page("pages/document_upload.py", title="Documentos"),
-        extraction_page,
-        document_viewer_page,
-    ],
-    "Datos": [
-        data_explorer_page,
-        st.Page("pages/search_engine.py", title="Buscar"),
-        st.Page("pages/table_builder.py", title="Crear tablas"),
-    ],
-    "Administración": [
-        st.Page("pages/audit_log.py", title="Auditoría"),
-        st.Page("pages/my_account.py", title="Cuenta"),
-    ],
-}
+return_to = st.session_state.pop("login_return_to", None)
+if return_to:
+    target_page, target_params = return_to
+    if current_page.url_path != target_page.url_path:
+        st.switch_page(target_page, query_params=target_params)
+    st.query_params.from_dict(target_params)
 
 with st.sidebar:
     st.markdown(f"**{st.session_state.full_name}**")
@@ -199,21 +189,14 @@ with st.sidebar:
     if st.button("Cerrar sesión", use_container_width=True):
         revoke_session(st.session_state.auth_token or _browser_token())
         _remove_browser_token()
-        for key, value in SESSION_DEFAULTS.items():
-            st.session_state[key] = value
+        clear_user_state(st.session_state, SESSION_DEFAULTS)
         st.rerun()
     st.divider()
 
-current_page = st.navigation(pages)
-
-# Alias de compatibilidad. st.switch_page limpia los query params en Streamlit 1.50,
-# por eso conservamos el identificador en Session State antes del cambio de página.
+# Alias de compatibilidad para enlaces antiguos en la raíz.
 if current_page.url_path == "" and st.query_params.get("document_id") is not None:
-    st.session_state.viewer_document_id = st.query_params.get("document_id")
-    st.switch_page(document_viewer_page)
+    st.switch_page("pages/document_viewer.py", query_params=st.query_params.to_dict())
 if current_page.url_path == "" and st.query_params.get("table") is not None:
-    st.session_state.requested_table = st.query_params.get("table")
-    st.session_state.requested_record_id = st.query_params.get("record_id")
-    st.switch_page(data_explorer_page)
+    st.switch_page("pages/data_explorer.py", query_params=st.query_params.to_dict())
 
 current_page.run()

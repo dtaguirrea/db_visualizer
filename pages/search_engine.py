@@ -1,4 +1,4 @@
-"""Búsqueda global en OCR, extracciones y tablas personalizadas."""
+"""Búsqueda global en OCR y tablas personalizadas."""
 import html
 from datetime import date
 import re
@@ -9,13 +9,13 @@ import streamlit as st
 from src.database import get_connection
 from src.documents import document_display_label, document_text_snippets
 from src.search import global_search, search_documents
-from src.table_relations import document_viewer_url, extraction_workspace_url
+from src.navigation import open_document, open_table
 
 if not st.session_state.get("logged_in"):
     st.stop()
 
 st.title("Buscar")
-st.caption("Busca en documentos OCR, extracciones y tablas personalizadas.")
+st.caption("Busca en documentos OCR y tablas personalizadas.")
 
 
 def _highlight(value: str | None, query: str) -> str:
@@ -43,6 +43,7 @@ with st.form("search_form"):
                                 min_value=date(1800, 1, 1), max_value=date.today())
     date_to = right.date_input("Fecha de autoría hasta (opcional)", value=None,
                               min_value=date(1800, 1, 1), max_value=date.today())
+    st.caption("Las fechas parciales se incluyen si su intervalo posible coincide con el filtro; las fechas sin año se excluyen al filtrar por fecha.")
     st.caption("Autor y fechas filtran documentos. Puedes dejar Texto vacío; usa ambas fechas iguales para un día exacto.")
     submitted = st.form_submit_button("Buscar", type="primary")
 
@@ -60,7 +61,7 @@ with get_connection() as conn:
     try:
         if any(filters.values()):
             results = {"documents": search_documents(conn, query, **filters),
-                       "extractions": [], "tables": []}
+                       "tables": []}
         else:
             results = global_search(conn, query)
     except Exception as exc:
@@ -68,9 +69,8 @@ with get_connection() as conn:
         st.stop()
 
 documents = results["documents"]
-extractions = results["extractions"]
 table_rows = results["tables"]
-total = len(documents) + len(extractions) + len(table_rows)
+total = len(documents) + len(table_rows)
 
 if total == 0:
     st.info("No se encontraron coincidencias.")
@@ -78,12 +78,11 @@ if total == 0:
 
 st.caption(
     f"{total} resultado(s): {len(documents)} documento(s), "
-    f"{len(extractions)} extracción(es), {len(table_rows)} registro(s) de tablas."
+    f"{len(table_rows)} registro(s) de tablas."
 )
 
-tab_documents, tab_extractions, tab_tables = st.tabs([
+tab_documents, tab_tables = st.tabs([
     f"Documentos ({len(documents)})",
-    f"Extracciones ({len(extractions)})",
     f"Tablas ({len(table_rows)})",
 ])
 
@@ -108,38 +107,8 @@ with tab_documents:
             )
             if query.casefold() in metadata_match.casefold():
                 st.markdown(_highlight(metadata_match, query), unsafe_allow_html=True)
-        st.link_button(
-            f"Abrir documento {int(row['document_id'])}",
-            document_viewer_url(row["document_id"]),
-        )
-        st.divider()
-
-with tab_extractions:
-    if not extractions:
-        st.info("Sin coincidencias en extracciones.")
-    for row in extractions:
-        st.markdown(
-            f"**Extracción {int(row['extraction_id'])} · {html.escape(document_display_label(row))}**"
-        )
-        st.caption(
-            f"{row['element_category'] or 'Sin categoría'} · "
-            f"pág. {row.get('page_number') or 'sin indicar'} · "
-            f"{row['review_status']} · {row['created_by']}"
-        )
-        text_value = "\n\n".join(
-            value for value in [
-                row.get("key_information"),
-                row.get("literal_quote"),
-                row.get("cross_reference_notes"),
-            ] if value
-        )
-        contexts = document_text_snippets(text_value, query, limit=2, radius=140)
-        for context in contexts:
-            st.markdown(_highlight(context, query), unsafe_allow_html=True)
-        st.link_button(
-            f"Abrir en Extracción · ficha {int(row['extraction_id'])}",
-            extraction_workspace_url(row["document_id"]),
-        )
+        if st.button(f"Ver coincidencias · documento {int(row['document_id'])}", key=f"search_doc_{row['document_id']}"):
+            open_document(row["document_id"], query=query)
         st.divider()
 
 with tab_tables:
@@ -152,8 +121,6 @@ with tab_tables:
         for value in row["matched_values"]:
             st.markdown(_highlight(value, query), unsafe_allow_html=True)
         table_url = f"/tablas?table={quote(row['table_name'])}&record_id={quote(str(row['record_id']))}"
-        st.link_button(
-            f"Abrir {row['table_name']} · {row['record_id']}",
-            table_url,
-        )
+        if st.button(f"Abrir {row['table_name']} · {row['record_id']}", key=f"search_table_{index}"):
+            open_table(row["table_name"], row["record_id"])
         st.divider()

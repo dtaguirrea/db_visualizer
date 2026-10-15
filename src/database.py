@@ -1,5 +1,6 @@
 """Acceso a datos de db_visualizer con PostgreSQL y SQLite para pruebas locales."""
 from collections import defaultdict
+from src.field_values import date_bounds
 from datetime import datetime, timezone
 from functools import lru_cache
 
@@ -48,6 +49,9 @@ def _add_document_columns_if_needed(conn: Connection) -> None:
     """Migra document_records sin eliminar datos de instalaciones anteriores."""
     columns = {c["name"] for c in inspect(conn).get_columns("document_records")}
     additions = {
+        "physical_location": "TEXT",
+        "document_date_start": "TEXT",
+        "document_date_end": "TEXT",
         "author": "TEXT",
         "title": "TEXT",
         "document_date": "TEXT",
@@ -145,7 +149,7 @@ def _reconcile_dynamic_column_registry(conn: Connection) -> None:
         metadata_rows: list[dict] = []
         for registry_name in registry_names:
             rows = conn.execute(text("""
-                SELECT table_name, column_name, column_type, ordinal_position, foreign_key_table
+                SELECT table_name, column_name, column_type, ordinal_position, foreign_key_table, options_json
                 FROM dynamic_table_columns
                 WHERE table_name = :table_name
             """), {"table_name": registry_name}).mappings().all()
@@ -197,9 +201,9 @@ def _reconcile_dynamic_column_registry(conn: Connection) -> None:
 
             conn.execute(text("""
                 INSERT INTO dynamic_table_columns (
-                    table_name, column_name, column_type, ordinal_position, foreign_key_table
+                    table_name, column_name, column_type, ordinal_position, foreign_key_table, options_json
                 ) VALUES (
-                    :table_name, :column_name, :column_type, :ordinal_position, :foreign_key_table
+                    :table_name, :column_name, :column_type, :ordinal_position, :foreign_key_table, :options_json
                 )
             """), {
                 "table_name": actual_table,
@@ -207,12 +211,15 @@ def _reconcile_dynamic_column_registry(conn: Connection) -> None:
                 "column_type": column_type,
                 "ordinal_position": ordinal,
                 "foreign_key_table": referred_table,
+                "options_json": next((row.get("options_json") for row in candidates if row.get("options_json")), None),
             })
             ordinal += 1
 
 
 def init_db() -> None:
     with get_engine().begin() as conn:
+        if is_postgres(conn):
+            conn.execute(text("SELECT pg_advisory_xact_lock(hashtext('db_visualizer_schema'))"))
         conn.execute(text(f'''CREATE TABLE IF NOT EXISTS users (
             {_pk_sql("user_id")},
             username TEXT NOT NULL UNIQUE,
@@ -307,7 +314,40 @@ def init_db() -> None:
             details TEXT
         )'''))
 
+        conn.execute(text("""CREATE TABLE IF NOT EXISTS schema_migrations (
+            version TEXT PRIMARY KEY, applied_at TEXT NOT NULL
+        )"""))
+        if "options_json" not in {c["name"] for c in inspect(conn).get_columns("dynamic_table_columns")}:
+            conn.execute(text("ALTER TABLE dynamic_table_columns ADD COLUMN options_json TEXT"))
         _reconcile_dynamic_column_registry(conn)
+        if not conn.execute(text("SELECT 1 FROM schema_migrations WHERE version = '3.0.0'")).scalar():
+            # Conversión necesaria únicamente para columnas históricas SQL DATE.
+            if is_postgres(conn):
+                quote = conn.dialect.identifier_preparer.quote
+                for row in conn.execute(text("SELECT table_name, column_name FROM dynamic_table_columns WHERE column_type = 'Fecha'")).mappings():
+                    physical = next(c for c in inspect(conn).get_columns(row['table_name']) if c['name'] == row['column_name'])
+                    if str(physical['type']).upper() == 'DATE':
+                        table, column = quote(row['table_name']), quote(row['column_name'])
+                        conn.execute(text(f"ALTER TABLE {table} ALTER COLUMN {column} TYPE TEXT USING {column}::text"))
+            for row in conn.execute(text("SELECT document_id, document_date FROM document_records")).mappings().all():
+                try:
+                    start, end = date_bounds(row['document_date'])
+                except ValueError:
+                    start, end = None, None
+                conn.execute(text("UPDATE document_records SET document_date_start=:start, document_date_end=:end WHERE document_id=:id"),
+                             dict(start=start, end=end, id=row['document_id']))
+            conn.execute(text("INSERT INTO schema_migrations VALUES ('3.0.0', :now)"), {'now': utc_now()})
+
+        if not conn.execute(text("SELECT 1 FROM schema_migrations WHERE version = '3.1.0'")).scalar():
+            # Repara solo límites derivados; no altera la fecha histórica original.
+            for row in conn.execute(text("SELECT document_id, document_date FROM document_records")).mappings().all():
+                try:
+                    start, end = date_bounds(row['document_date'])
+                except ValueError:
+                    start, end = None, None
+                conn.execute(text("UPDATE document_records SET document_date_start=:start, document_date_end=:end WHERE document_id=:id"),
+                             dict(start=start, end=end, id=row['document_id']))
+            conn.execute(text("INSERT INTO schema_migrations VALUES ('3.1.0', :now)"), {'now': utc_now()})
 
         if is_postgres(conn):
             conn.execute(text('''
@@ -388,7 +428,7 @@ def get_incoming_foreign_keys(conn: Connection, table_name: str) -> list[dict]:
 
 def get_dynamic_column_metadata(conn: Connection, table_name: str) -> list[dict]:
     rows = conn.execute(text('''
-        SELECT column_name, column_type, ordinal_position, foreign_key_table
+        SELECT column_name, column_type, ordinal_position, foreign_key_table, options_json
         FROM dynamic_table_columns
         WHERE table_name = :table_name
         ORDER BY ordinal_position, column_name

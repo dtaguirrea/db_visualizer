@@ -1,0 +1,11 @@
+FROM ghcr.io/huridocs/pdf-document-layout-analysis:latest
+
+USER root
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        tesseract-ocr-por \
+        tesseract-ocr-ita \
+    && rm -rf /var/lib/apt/lists/*
+
+USER python

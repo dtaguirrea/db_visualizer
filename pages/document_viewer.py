@@ -15,7 +15,7 @@ from src.documents import (
     get_visible_pdf_path,
     safe_pdf_filename,
 )
-from src.table_relations import extraction_workspace_url
+from src.pdf_search import find_passages, page_texts, single_page
 
 if not st.session_state.get("logged_in"):
     st.stop()
@@ -25,7 +25,7 @@ st.title("Visor de documentos")
 with get_connection() as conn:
     rows = conn.execute(text('''
         SELECT document_id, title, author, source_reference, document_date, original_format,
-               ocr_language, ocr_status, ocr_error, original_file_path, ocr_file_path,
+               physical_location, ocr_language, ocr_status, ocr_error, original_file_path, ocr_file_path,
                file_path, ocr_text, created_by, created_at, updated_by, updated_at
         FROM document_records
         ORDER BY document_id DESC
@@ -42,7 +42,12 @@ raw_document_id = st.query_params.get("document_id")
 try:
     requested_id = int(raw_document_id) if raw_document_id is not None else None
 except (TypeError, ValueError):
-    requested_id = None
+    st.error("El identificador del documento no es válido.")
+    st.stop()
+
+if requested_id is not None and requested_id not in document_by_id:
+    st.error("El documento solicitado no existe o fue eliminado.")
+    st.stop()
 
 selection_key = "viewer_document_selection"
 last_query_key = "viewer_last_query_document_id"
@@ -50,7 +55,8 @@ if requested_id in document_by_id and st.session_state.get(last_query_key) != re
     st.session_state[selection_key] = requested_id
     st.session_state[last_query_key] = requested_id
 elif st.session_state.get(selection_key) not in document_by_id:
-    st.session_state[selection_key] = document_ids[0]
+    previous = st.session_state.get("viewer_document_id")
+    st.session_state[selection_key] = previous if previous in document_by_id else document_ids[0]
 
 document_id = st.selectbox(
     "Documento que deseas visualizar",
@@ -59,6 +65,9 @@ document_id = st.selectbox(
     format_func=lambda value: document_display_label(document_by_id[value]),
 )
 if requested_id != document_id:
+    for parameter in ("q", "page"):
+        if parameter in st.query_params:
+            del st.query_params[parameter]
     st.query_params["document_id"] = str(document_id)
     st.session_state[last_query_key] = document_id
 st.session_state.viewer_document_id = document_id
@@ -70,6 +79,8 @@ if document.get("author"):
     metadata_parts.append(f"Autor: {document['author']}")
 if document.get("source_reference"):
     metadata_parts.append(f"Origen: {document['source_reference']}")
+if document.get("physical_location"):
+    metadata_parts.append(f"Localización física: {document['physical_location']}")
 if document.get("document_date"):
     metadata_parts.append(f"Fecha: {document['document_date']}")
 metadata_parts.extend([
@@ -86,7 +97,7 @@ if not pdf_path or not Path(pdf_path).is_file():
     st.stop()
 
 ocr_pdf_path = get_ocr_pdf_path(document)
-col_download, col_original, col_extract, _ = st.columns([1.35, 1.15, 1.3, 3])
+col_download, col_original, _ = st.columns([1.35, 1.15, 4.3])
 
 with col_download:
     if ocr_pdf_path:
@@ -131,13 +142,6 @@ with col_original:
                 on_click="ignore",
             )
 
-with col_extract:
-    st.link_button(
-        "Crear ficha de extracción",
-        extraction_workspace_url(document_id),
-        use_container_width=True,
-    )
-
 if ocr_pdf_path:
     st.caption("Se muestra la copia PDF con capa de texto OCR.")
 elif document["ocr_status"] == "error":
@@ -145,14 +149,42 @@ elif document["ocr_status"] == "error":
 else:
     st.warning("Este documento todavía no tiene una copia OCR disponible.")
 
-with st.expander("Buscar en este documento", expanded=False):
+incoming_query = st.query_params.get("q", "")
+search_key = f"document_search_{document_id}"
+query_marker = (document_id, incoming_query)
+if st.session_state.get("viewer_query_marker") != query_marker:
+    st.session_state[search_key] = incoming_query
+    st.session_state["viewer_query_marker"] = query_marker
+located_page = None
+with st.expander("Buscar en este documento", expanded=bool(incoming_query)):
     local_query = st.text_input(
         "Texto",
         placeholder="Palabra o frase",
-        key=f"document_search_{document_id}",
+        key=search_key,
     )
     if local_query.strip():
-        snippets = document_text_snippets(document.get("ocr_text"), local_query, limit=20)
+        try:
+            passages = find_passages(pdf_path, local_query)
+        except Exception:
+            passages = []
+        if passages:
+            desired_page = st.query_params.get("page")
+            initial_match = next((i for i, item in enumerate(passages) if str(item["page"]) == desired_page), 0)
+            match = st.selectbox(
+                "Coincidencias en el PDF",
+                options=range(len(passages)),
+                index=initial_match,
+                format_func=lambda i: f"Página {passages[i]['page']} · {passages[i]['snippet'][:100]}",
+                key=f"passage_{document_id}_{local_query}_{desired_page}",
+            )
+            located_page = passages[match]["page"]
+            snippets = [passages[match]["snippet"]]
+            if not passages[match]["exact"]:
+                st.caption("Coincidencias por palabras; no se encontró la frase completa en el PDF.")
+        else:
+            snippets = document_text_snippets(document.get("ocr_text"), local_query, limit=20)
+            if snippets:
+                st.warning("Hay coincidencias en el índice, pero no fue posible ubicar su página en el PDF.")
         if snippets:
             st.caption(f"{len(snippets)} fragmento(s) mostrado(s)")
             terms = [local_query.strip()] + [
@@ -175,4 +207,27 @@ with st.expander("Buscar en este documento", expanded=False):
         else:
             st.info("Este PDF no contiene texto indexado para la búsqueda interna.")
 
-st.pdf(pdf_path, height=900, key=f"pdf_viewer_{document_id}")
+try:
+    page_count = len(page_texts(pdf_path))
+    raw_page = st.query_params.get("page")
+    requested_page = int(raw_page) if raw_page else None
+    if requested_page is not None and not 1 <= requested_page <= page_count:
+        st.warning("La página solicitada está fuera del PDF. Selecciona una página válida.")
+        requested_page = None
+    target_page = located_page or requested_page or 1
+    target_marker = (document_id, raw_page, local_query, located_page)
+    page_key = f"pdf_page_{document_id}"
+    if st.session_state.get("pdf_target_marker") != target_marker:
+        st.session_state[page_key] = target_page
+        st.session_state["pdf_target_marker"] = target_marker
+    st.caption("La numeración corresponde a páginas del archivo PDF; puede diferir de la numeración impresa.")
+    mode = st.radio("Visualización", ["Página seleccionada", "Documento completo"], horizontal=True)
+    if mode == "Página seleccionada" and page_count:
+        page = int(st.number_input("Página del PDF", min_value=1, max_value=page_count, step=1, key=page_key))
+        st.caption(f"Página {page} de {page_count}")
+        st.pdf(single_page(pdf_path, page), height=900, key=f"pdf_viewer_{document_id}_{page}")
+    else:
+        st.pdf(pdf_path, height=900, key=f"pdf_viewer_{document_id}")
+except Exception as exc:
+    st.warning(f"No se pudo preparar la navegación por páginas: {exc}")
+    st.pdf(pdf_path, height=900, key=f"pdf_fallback_{document_id}")

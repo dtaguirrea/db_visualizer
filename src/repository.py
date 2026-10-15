@@ -8,7 +8,8 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 
 from src.audit import log_action
-from src.database import get_primary_key_column, utc_now
+from src.database import get_primary_key_column, get_dynamic_column_metadata, is_postgres, utc_now
+from src.field_values import normalize_field, column_options
 
 AUDIT_COLUMNS = ("created_by", "created_at", "updated_by", "updated_at")
 
@@ -98,6 +99,14 @@ def _canonical_user_values(conn: Connection, table_name: str, values: dict, pk_c
                 f"El campo '{physical_name}' fue recibido dos veces con valores distintos. Recarga la página."
             )
 
+    metadata = {c['column_name']: c for c in get_dynamic_column_metadata(conn, table_name)}
+    for name, value in canonical.items():
+        if name in metadata:
+            column = metadata[name]
+            try:
+                canonical[name] = normalize_field(value, column['column_type'], column_options(column))
+            except ValueError as exc:
+                raise InvalidRecordError(f"{name}: {exc}") from exc
     return canonical
 
 
@@ -181,7 +190,7 @@ def sync_table_edits(conn: Connection, table_name: str, original_df: pd.DataFram
                 if _clean_value(edited_row.get(c)) != _clean_value(original_row.get(c))
             ]
             if changed_columns:
-                params = {c: _clean_value(edited_row.get(c)) for c in changed_columns}
+                params = _canonical_user_values(conn, table_name, {c: edited_row.get(c) for c in changed_columns}, pk_column)
                 params.update({
                     "updated_by": username,
                     "updated_at": now,
@@ -208,6 +217,7 @@ def sync_table_edits(conn: Connection, table_name: str, original_df: pd.DataFram
                 summary["updated"] += 1
 
         for pk_value in set(original_by_pk) - seen_pks:
+            _check_references(conn, table_name, pk_value)
             original_row = original_by_pk[pk_value]
             original_updated_at = _clean_value(original_row.get("updated_at"))
             params = {"pk": pk_value, "original_updated_at": original_updated_at}
@@ -232,6 +242,20 @@ def sync_table_edits(conn: Connection, table_name: str, original_df: pd.DataFram
         raise
 
 
+def _check_references(conn, table_name, pk_value):
+    if is_postgres(conn):
+        pk = get_primary_key_column(conn, table_name)
+        # Impide que aparezca un vínculo nuevo entre la comprobación y el DELETE.
+        conn.execute(text(f"SELECT {_quote(conn, pk)} FROM {_quote(conn, table_name)} WHERE {_quote(conn, pk)}=:pk FOR UPDATE"), {'pk': pk_value})
+    for source in inspect(conn).get_table_names():
+        for fk in inspect(conn).get_foreign_keys(source):
+            if fk.get('referred_table') != table_name:
+                continue
+            for column in fk.get('constrained_columns', []):
+                if conn.execute(text(f"SELECT 1 FROM {_quote(conn, source)} WHERE {_quote(conn, column)} = :pk LIMIT 1"), {'pk': pk_value}).first():
+                    raise RecordInUseError(f"El registro {pk_value} está referenciado por {source}. Elimina primero ese vínculo.")
+
+
 def delete_records(conn: Connection, table_name: str, records: list[dict], username: str) -> int:
     """Elimina explícitamente varias filas con auditoría y control de concurrencia."""
     if not records:
@@ -242,6 +266,7 @@ def delete_records(conn: Connection, table_name: str, records: list[dict], usern
     deleted = 0
     try:
         for record in records:
+            _check_references(conn, table_name, record["pk"])
             pk_value = _clean_value(record.get("pk"))
             expected_updated_at = _clean_value(record.get("updated_at"))
             params = {"pk": pk_value, "expected_updated_at": expected_updated_at}

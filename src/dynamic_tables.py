@@ -1,5 +1,7 @@
 """Creación y eliminación controlada de tablas personalizadas."""
 import re
+import json
+from src.field_values import normalize_options
 
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Connection
@@ -14,6 +16,7 @@ _TYPE_MAP = {
     "Número entero": "BIGINT",
     "Número decimal": "DOUBLE PRECISION",
     "Fecha": "TEXT",
+    "Opciones": "TEXT",
 }
 
 
@@ -33,8 +36,72 @@ def validate_identifier(name: str, kind: str = "identificador") -> str:
     return candidate
 
 
+def prepare_column(conn, column, seen, ordinal):
+    quote = conn.dialect.identifier_preparer.quote
+    name = validate_identifier(column['name'], 'nombre de columna')
+    if name.casefold() in {value.casefold() for value in seen}:
+        raise InvalidIdentifierError(f"La columna '{name}' está repetida o reservada.")
+    seen.add(name)
+    kind = column.get('type') or 'Texto'
+    if kind not in {*_TYPE_MAP, 'Documento', 'Llave foránea'}:
+        raise ValueError('Tipo de columna no válido.')
+    target = column.get('foreign_key_table')
+    if kind == 'Documento':
+        target = 'document_records'
+    if kind == 'Llave foránea' and not target:
+        raise ValueError('Selecciona una tabla relacionada.')
+    if target and kind not in ('Documento', 'Llave foránea'):
+        raise ValueError('Elige Llave foránea para definir una relación.')
+    options = normalize_options(column.get('options', [])) if kind == 'Opciones' else None
+    if target:
+        allowed = {'document_records'} | {row['table_name'] for row in list_registered_tables(conn)}
+        if target not in allowed:
+            raise ValueError('La tabla relacionada debe ser Documentos o una tabla personalizada.')
+        pk = get_primary_key_column(conn, target)
+        physical = next(c for c in inspect(conn).get_columns(target) if c['name'] == pk)
+        definition = f"{quote(name)} {physical['type']} REFERENCES {quote(target)}({quote(pk)}) ON DELETE RESTRICT"
+    else:
+        definition = f"{quote(name)} {_TYPE_MAP[kind]}"
+    if options:
+        literals = ', '.join("'" + value.replace("'", "''") + "'" for value in options)
+        definition += f" CHECK ({quote(name)} IN ({literals}))"
+    return definition, dict(name=name, type=kind, foreign_key_table=target,
+                            ordinal_position=ordinal,
+                            options_json=json.dumps(options, ensure_ascii=False) if options else None)
+
+
+def add_dynamic_column(conn, table_name, column, username):
+    """Amplía el esquema y sus metadatos en una única transacción, dejando NULL en filas previas."""
+    try:
+        if is_postgres(conn):
+            conn.execute(text("SELECT pg_advisory_xact_lock(hashtext('db_visualizer_schema'))"))
+        elif not conn.connection.driver_connection.in_transaction:
+            conn.exec_driver_sql('BEGIN')
+        if table_name not in {row['table_name'] for row in list_registered_tables(conn)}:
+            raise ValueError('Selecciona una tabla personalizada registrada.')
+        quote = conn.dialect.identifier_preparer.quote
+        physical = inspect(conn).get_columns(table_name)
+        seen = {c['name'] for c in physical}
+        ordinal = conn.execute(text('SELECT COALESCE(MAX(ordinal_position), -1) + 1 FROM dynamic_table_columns WHERE table_name=:table'),
+                               {'table': table_name}).scalar_one()
+        definition, normalized = prepare_column(conn, column, seen, ordinal)
+        # DDL es generado desde identificadores validados y literales escapados.
+        conn.execution_options(no_parameters=True).exec_driver_sql(f"ALTER TABLE {quote(table_name)} ADD COLUMN {definition}")
+        conn.execute(text("""INSERT INTO dynamic_table_columns
+            (table_name, column_name, column_type, ordinal_position, foreign_key_table, options_json)
+            VALUES (:table, :name, :type, :ordinal_position, :foreign_key_table, :options_json)"""),
+            dict(table=table_name, **normalized))
+        log_action(conn, table_name, None, 'ADD_COLUMN', username,
+                   details={'column': normalized['name'], 'type': normalized['type']})
+        conn.commit()
+        return normalized['name']
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def create_dynamic_table(conn: Connection, table_name: str, columns: list,
-                         description: str, username: str) -> str:
+                         description: str, username: str, *, commit: bool = True) -> str:
     safe_table_name = validate_identifier(table_name, "nombre de tabla")
     if safe_table_name in config.PROTECTED_TABLES:
         raise InvalidIdentifierError(f"'{safe_table_name}' es un nombre reservado del sistema.")
@@ -51,35 +118,9 @@ def create_dynamic_table(conn: Connection, table_name: str, columns: list,
     seen = {"record_id", "created_by", "created_at", "updated_by", "updated_at"}
 
     for ordinal, column in enumerate(columns):
-        column_name = validate_identifier(column["name"], "nombre de columna")
-        if column_name in seen:
-            raise InvalidIdentifierError(f"La columna '{column_name}' está repetida o reservada.")
-        seen.add(column_name)
-
-        foreign_table = column.get("foreign_key_table")
-        column_type = column.get("type") or "Texto"
-        if foreign_table:
-            foreign_table = validate_identifier(foreign_table, "tabla referenciada")
-            if foreign_table not in inspect(conn).get_table_names():
-                raise InvalidIdentifierError(f"La tabla referenciada '{foreign_table}' no existe.")
-            referenced_pk = get_primary_key_column(conn, foreign_table)
-            referenced_column = next(
-                col for col in inspect(conn).get_columns(foreign_table) if col["name"] == referenced_pk
-            )
-            referenced_type = str(referenced_column["type"])
-            definitions.append(f"{quote(column_name)} {referenced_type}")
-            foreign_keys.append(
-                f"FOREIGN KEY ({quote(column_name)}) REFERENCES {quote(foreign_table)}({quote(referenced_pk)}) ON DELETE SET NULL"
-            )
-        else:
-            definitions.append(f"{quote(column_name)} {_TYPE_MAP.get(column_type, 'TEXT')}")
-
-        normalized_columns.append({
-            "name": column_name,
-            "type": column_type,
-            "foreign_key_table": foreign_table,
-            "ordinal_position": ordinal,
-        })
+        definition, normalized = prepare_column(conn, column, seen, ordinal)
+        definitions.append(definition)
+        normalized_columns.append(normalized)
 
     definitions.extend([
         "created_by TEXT NOT NULL",
@@ -88,7 +129,7 @@ def create_dynamic_table(conn: Connection, table_name: str, columns: list,
         "updated_at TEXT",
     ])
     ddl = f"CREATE TABLE {quote(safe_table_name)} (\n  " + ",\n  ".join(definitions + foreign_keys) + "\n)"
-    conn.execute(text(ddl))
+    conn.execution_options(no_parameters=True).exec_driver_sql(ddl)
     conn.execute(text('''
         INSERT INTO dynamic_tables_registry (table_name, description, created_by, created_at)
         VALUES (:table_name, :description, :created_by, :created_at)
@@ -101,9 +142,9 @@ def create_dynamic_table(conn: Connection, table_name: str, columns: list,
     for column in normalized_columns:
         conn.execute(text('''
             INSERT INTO dynamic_table_columns (
-                table_name, column_name, column_type, ordinal_position, foreign_key_table
+                table_name, column_name, column_type, ordinal_position, foreign_key_table, options_json
             ) VALUES (
-                :table_name, :column_name, :column_type, :ordinal_position, :foreign_key_table
+                :table_name, :column_name, :column_type, :ordinal_position, :foreign_key_table, :options_json
             )
         '''), {
             "table_name": safe_table_name,
@@ -111,10 +152,12 @@ def create_dynamic_table(conn: Connection, table_name: str, columns: list,
             "column_type": column["type"],
             "ordinal_position": column["ordinal_position"],
             "foreign_key_table": column["foreign_key_table"],
+            "options_json": column["options_json"],
         })
     log_action(conn, safe_table_name, None, "CREATE_TABLE", username,
                details={"columns": [c["name"] for c in normalized_columns]})
-    conn.commit()
+    if commit:
+        conn.commit()
     return safe_table_name
 
 

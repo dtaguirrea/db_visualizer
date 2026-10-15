@@ -5,6 +5,11 @@ import streamlit as st
 from sqlalchemy import text
 
 import config
+from src.csv_tables import export_csv
+from src.csv_ui import render_csv_import
+from src.column_ui import render_add_column
+from src.field_values import DATE_HELP, normalize_partial_date, column_options
+from src.navigation import open_document
 from src.database import (
     get_connection,
     get_dynamic_column_metadata,
@@ -24,6 +29,16 @@ if not st.session_state.get("logged_in"):
     st.stop()
 
 st.title("Tablas")
+notice = st.session_state.pop('table_notice', None)
+if notice:
+    st.success(notice)
+
+
+def reset_snapshot(table):
+    st.session_state.pop(f'table_snapshot_{table}', None)
+    key = f'table_generation_{table}'
+    st.session_state[key] = st.session_state.get(key, 0) + 1
+
 
 
 def _parse_form_value(raw_value: str, column_type: str):
@@ -55,9 +70,22 @@ with get_connection() as conn:
 
     pk_column = get_primary_key_column(conn, selected_table)
     quote = conn.dialect.identifier_preparer.quote
-    original_df = pd.read_sql_query(
-        text(f"SELECT * FROM {quote(selected_table)} ORDER BY {quote(pk_column)}"), conn
-    )
+    metadata = get_dynamic_column_metadata(conn, selected_table)
+    signature = repr(metadata)
+    snapshot_key = f'table_snapshot_{selected_table}'
+    snapshot = st.session_state.get(snapshot_key)
+    if snapshot is not None and snapshot['signature'] != signature:
+        st.warning('La estructura de la tabla cambió. Recarga antes de continuar.')
+        if st.button('Recargar estructura'):
+            reset_snapshot(selected_table)
+            st.rerun()
+        st.stop()
+    if snapshot is None:
+        frame = pd.read_sql_query(text(f"SELECT * FROM {quote(selected_table)} ORDER BY {quote(pk_column)}"), conn)
+        snapshot = {'signature': signature, 'data': frame}
+        st.session_state[snapshot_key] = snapshot
+    original_df = snapshot['data'].copy()
+    generation = st.session_state.get(f'table_generation_{selected_table}', 0)
     requested_record_id = (st.query_params.get("record_id") or pending_record_id) if requested_table == selected_table else None
     if requested_record_id and not original_df.empty:
         pk_text = original_df[pk_column].map(lambda value: str(value).removesuffix(".0"))
@@ -68,9 +96,24 @@ with get_connection() as conn:
     fk_choices = get_foreign_key_choices(conn, selected_table)
     metadata = get_dynamic_column_metadata(conn, selected_table)
 
-    tab_records, tab_new, tab_delete = st.tabs([
-        "Registros", "Nuevo registro", "Eliminar registros"
+    st.download_button(
+        "Descargar tabla como CSV",
+        data=export_csv(original_df),
+        file_name=f"{selected_table}.csv",
+        mime="text/csv",
+        key=f"download_csv_{selected_table}",
+        help="Exporta los datos guardados, incluyendo IDs y auditoría. Las relaciones se exportan como IDs.",
+    )
+
+    tab_records, tab_new, tab_delete, tab_csv, tab_columns = st.tabs([
+        "Registros", "Nuevo registro", "Eliminar registros", "Importar CSV", "Agregar columna"
     ])
+
+    with tab_columns:
+        render_add_column(conn, selected_table, st.session_state.username)
+
+    with tab_csv:
+        render_csv_import(conn, st.session_state.username, table_name=selected_table)
 
     with tab_records:
         display_df = original_df.copy()
@@ -95,19 +138,28 @@ with get_connection() as conn:
         for column in metadata:
             name = column["column_name"]
             if column["column_type"] == "Fecha" and name in display_df:
-                display_df[name] = display_df[name].map(
-                    lambda value: None if pd.isna(value) or value == "" else date.fromisoformat(str(value)[:10])
-                )
-                column_config[name] = st.column_config.DateColumn(
-                    name, min_value=date(1800, 1, 1), max_value=date.today(), format="YYYY-MM-DD"
-                )
+                display_df[name] = display_df[name].map(lambda value: None if pd.isna(value) else str(value))
+                column_config[name] = st.column_config.TextColumn(name, help=DATE_HELP)
+                invalid_count = 0
+                for value in display_df[name].dropna():
+                    try:
+                        normalize_partial_date(value)
+                    except ValueError:
+                        invalid_count += 1
+                if invalid_count:
+                    st.warning(f"{name}: {invalid_count} fecha(s) antigua(s) necesitan revisión. Se conservan y puedes corregirlas aquí.")
+            elif column['column_type'] == 'Opciones' and name in display_df:
+                column_config[name] = st.column_config.SelectboxColumn(name, options=column_options(column))
+
+        if any(column['column_type'] == 'Fecha' for column in metadata):
+            st.caption(DATE_HELP)
 
         edited_display_df = st.data_editor(
             display_df,
             num_rows="fixed",
             use_container_width=True,
             column_config=column_config,
-            key=f"editor_v6_{selected_table}",
+            key=f"editor_v3_{selected_table}_{generation}",
             height=520,
             hide_index=True,
         )
@@ -131,13 +183,6 @@ with get_connection() as conn:
             for column_name in document_fk_columns:
                 link_column = f"Abrir · {column_name}"
                 link_data[column_name] = edited_display_df[column_name]
-                link_data[link_column] = edited_raw_df[column_name].map(
-                    lambda value: document_viewer_url(value) or ""
-                )
-                link_config[link_column] = st.column_config.LinkColumn(
-                    link_column,
-                    display_text="Abrir documento",
-                )
             st.caption("Documentos vinculados")
             st.dataframe(
                 link_data,
@@ -145,6 +190,14 @@ with get_connection() as conn:
                 hide_index=True,
                 column_config=link_config,
             )
+            linked_ids = sorted({int(value) for column in document_fk_columns
+                                 for value in edited_raw_df[column].dropna() if str(value).strip()})
+            if linked_ids:
+                labels = fk_choices[document_fk_columns[0]]["labels"]
+                target_document = st.selectbox("Documento vinculado que deseas abrir", linked_ids,
+                    format_func=lambda value: labels.get(value, str(value)))
+                if st.button("Abrir documento vinculado"):
+                    open_document(target_document)
 
         col_save, col_reload, _ = st.columns([1, 1, 4])
         with col_save:
@@ -153,6 +206,7 @@ with get_connection() as conn:
             reload_page = st.button("Recargar", use_container_width=True)
 
         if reload_page:
+            reset_snapshot(selected_table)
             st.rerun()
 
         if save:
@@ -160,6 +214,7 @@ with get_connection() as conn:
                 summary = sync_table_edits(
                     conn, selected_table, original_df, edited_raw_df, st.session_state.username
                 )
+                reset_snapshot(selected_table)
                 st.success(
                     f"Guardado: {summary['updated']} editados, {summary['deleted']} eliminados."
                 )
@@ -174,7 +229,7 @@ with get_connection() as conn:
         if not metadata:
             st.warning("No se encontraron metadatos de columnas para esta tabla.")
         else:
-            with st.form(f"new_record_{selected_table}", clear_on_submit=True):
+            with st.form(f"new_record_{selected_table}_{generation}", clear_on_submit=False):
                 values = {}
                 parse_specs = {}
                 for column in metadata:
@@ -190,27 +245,42 @@ with get_connection() as conn:
                             format_func=lambda value, labels=relation["labels"]: (
                                 "Sin selección" if value is None else labels.get(value, str(value))
                             ),
-                            key=f"new_{selected_table}_{column_name}",
+                            key=f"new_{selected_table}_{column_name}_{generation}",
+                            help=(
+                                f"Registros de {relation['referred_table']}. "
+                                "Abre la lista y escribe para buscar por ID o descripción."
+                            ),
+                            disabled=not relation["options"],
                         )
+                        if not relation["options"]:
+                            st.info(
+                                f"La tabla {relation['referred_table']} no tiene registros. "
+                                "Agrega registros allí y vuelve a esta tabla para seleccionarlos."
+                            )
+                    elif column_type == "Opciones":
+                        values[column_name] = st.selectbox(column_name, [None] + column_options(column),
+                            format_func=lambda value: 'Sin información' if value is None else value,
+                            key=f"new_{selected_table}_{column_name}_{generation}")
                     elif column_type == "Fecha":
                         raw = st.text_input(
                             column_name,
-                            placeholder="AAAA-MM-DD",
-                            key=f"new_{selected_table}_{column_name}",
+                            placeholder="1950 / 1950-06 / 1950-06-12",
+                            help=DATE_HELP,
+                            key=f"new_{selected_table}_{column_name}_{generation}",
                         )
                         values[column_name] = raw
                         parse_specs[column_name] = column_type
                     elif column_type in ("Número entero", "Número decimal"):
                         raw = st.text_input(
                             column_name,
-                            key=f"new_{selected_table}_{column_name}",
+                            key=f"new_{selected_table}_{column_name}_{generation}",
                         )
                         values[column_name] = raw
                         parse_specs[column_name] = column_type
                     else:
                         values[column_name] = st.text_input(
                             column_name,
-                            key=f"new_{selected_table}_{column_name}",
+                            key=f"new_{selected_table}_{column_name}_{generation}",
                         )
 
                 create = st.form_submit_button("Agregar registro", type="primary")
@@ -227,6 +297,7 @@ with get_connection() as conn:
                     new_pk = insert_record(
                         conn, selected_table, parsed_values, st.session_state.username
                     )
+                    reset_snapshot(selected_table)
                     st.success(f"Registro {new_pk} agregado.")
                     st.rerun()
                 except ValueError as exc:
@@ -289,6 +360,7 @@ with get_connection() as conn:
                     deleted = delete_records(
                         conn, selected_table, records_to_delete, st.session_state.username
                     )
+                    reset_snapshot(selected_table)
                     st.success(f"{deleted} registro(s) eliminado(s).")
                     st.rerun()
                 except (ConcurrentEditError, InvalidRecordError) as exc:

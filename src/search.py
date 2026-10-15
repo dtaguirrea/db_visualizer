@@ -1,4 +1,4 @@
-"""Búsqueda global de documentos, extracciones y tablas personalizadas."""
+"""Búsqueda global de documentos y tablas personalizadas."""
 from __future__ import annotations
 
 from sqlalchemy import inspect, text
@@ -23,8 +23,13 @@ def _like_pattern(query: str) -> str:
 def search_documents(conn: Connection, query: str, limit: int | None = None,
                      *, author: str = "", date_from=None, date_to=None) -> list[dict]:
     from src.document_service import normalize_document_date
-    date_from = normalize_document_date(date_from)
-    date_to = normalize_document_date(date_to)
+    from src.field_values import date_bounds
+    normalized_from = normalize_document_date(date_from)
+    normalized_to = normalize_document_date(date_to)
+    date_from = date_bounds(normalized_from)[0]
+    date_to = date_bounds(normalized_to)[1]
+    if (normalized_from and date_from is None) or (normalized_to and date_to is None):
+        raise ValueError('Los límites del filtro cronológico deben incluir un año conocido.')
     if date_from and date_to and date_from > date_to:
         raise ValueError("La fecha inicial no puede ser posterior a la final.")
     query = (query or "").strip()
@@ -41,8 +46,8 @@ def search_documents(conn: Connection, query: str, limit: int | None = None,
         FROM (
             SELECT * FROM document_records
             WHERE LOWER(COALESCE(author, '')) LIKE LOWER(:author) ESCAPE '\\'
-              AND (CAST(:date_from AS TEXT) IS NULL OR document_date >= :date_from)
-              AND (CAST(:date_to AS TEXT) IS NULL OR document_date <= :date_to)
+              AND (CAST(:date_from AS TEXT) IS NULL OR document_date_end >= :date_from)
+              AND (CAST(:date_to AS TEXT) IS NULL OR document_date_start <= :date_to)
         ) AS filtered_documents
     '''
     if is_postgres(conn):
@@ -83,35 +88,6 @@ def search_documents(conn: Connection, query: str, limit: int | None = None,
             ORDER BY document_id DESC
             LIMIT :limit
         '''), params).mappings().all()
-    return [dict(row) for row in rows]
-
-
-def search_extractions(conn: Connection, query: str, limit: int | None = None) -> list[dict]:
-    query = (query or "").strip()
-    if not query:
-        return []
-    limit = limit or config.SEARCH_RESULT_LIMIT
-    pattern = _like_pattern(query)
-    operator = "ILIKE" if is_postgres(conn) else "LIKE"
-    sql = f'''
-        SELECT e.extraction_id, e.document_id, e.page_number,
-               e.element_category, e.key_information,
-               e.literal_quote, e.cross_reference_notes, e.review_status,
-               e.created_by, e.created_at, d.title, d.source_reference, d.document_date
-        FROM extraction_records e
-        JOIN document_records d ON d.document_id = e.document_id
-        WHERE
-            COALESCE(e.element_category, '') {operator} :pattern ESCAPE '\\'
-            OR COALESCE(e.key_information, '') {operator} :pattern ESCAPE '\\'
-            OR COALESCE(e.literal_quote, '') {operator} :pattern ESCAPE '\\'
-            OR COALESCE(e.cross_reference_notes, '') {operator} :pattern ESCAPE '\\'
-            OR COALESCE(d.title, '') {operator} :pattern ESCAPE '\\'
-            OR COALESCE(d.source_reference, '') {operator} :pattern ESCAPE '\\'
-            OR COALESCE(d.document_date, '') {operator} :pattern ESCAPE '\\'
-        ORDER BY e.extraction_id DESC
-        LIMIT :limit
-    '''
-    rows = conn.execute(text(sql), {"pattern": pattern, "limit": limit}).mappings().all()
     return [dict(row) for row in rows]
 
 
@@ -187,6 +163,5 @@ def search_dynamic_tables(conn: Connection, query: str, limit: int | None = None
 def global_search(conn: Connection, query: str) -> dict[str, list[dict]]:
     return {
         "documents": search_documents(conn, query),
-        "extractions": search_extractions(conn, query),
         "tables": search_dynamic_tables(conn, query),
     }

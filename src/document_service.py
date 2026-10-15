@@ -47,28 +47,18 @@ class ConcurrentDocumentEditError(DocumentServiceError):
     """El documento cambió después de abrir el formulario."""
 
 
+from src.field_values import normalize_partial_date, date_bounds
+
+
 class InvalidDocumentDate(ValueError):
     """La fecha está fuera del rango permitido."""
 
 
 def normalize_document_date(value: date | datetime | str | None) -> str | None:
-    """Normaliza una fecha y restringe el rango entre 1800-01-01 y hoy."""
-    if value is None or (isinstance(value, str) and not value.strip()):
-        return None
-    if isinstance(value, datetime):
-        parsed = value.date()
-    elif isinstance(value, date):
-        parsed = value
-    else:
-        try:
-            parsed = date.fromisoformat(str(value).strip())
-        except ValueError as exc:
-            raise InvalidDocumentDate("La fecha debe usar el formato AAAA-MM-DD.") from exc
-    if parsed < MIN_DOCUMENT_DATE or parsed > date.today():
-        raise InvalidDocumentDate(
-            f"La fecha debe estar entre {MIN_DOCUMENT_DATE.isoformat()} y {date.today().isoformat()}."
-        )
-    return parsed.isoformat()
+    try:
+        return normalize_partial_date(value)
+    except ValueError as exc:
+        raise InvalidDocumentDate(str(exc)) from exc
 
 
 def _queue_lock(conn: Connection) -> None:
@@ -122,13 +112,13 @@ def enqueue_documents(records: Iterable[dict], username: str) -> list[int]:
                 document_date = normalize_document_date(item.get("document_date"))
                 result = conn.execute(text('''
                     INSERT INTO document_records (
-                        title, author, source_reference, document_date, original_format,
+                        title, author, source_reference, document_date, document_date_start, document_date_end, original_format,
                         file_path, original_file_path, ocr_file_path, ocr_text,
                         ocr_status, ocr_error, queued_at, processing_started_at,
                         processing_finished_at, ocr_attempts,
                         ocr_language, created_by, created_at, updated_by, updated_at
                     ) VALUES (
-                        :title, :author, :source_reference, :document_date, :original_format,
+                        :title, :author, :source_reference, :document_date, :date_start, :date_end, :original_format,
                         :original_file_path, :original_file_path, NULL, '',
                         'en_cola', NULL, :queued_at, NULL, NULL, 0, :ocr_language,
                         :created_by, :created_at, :updated_by, :updated_at
@@ -138,6 +128,8 @@ def enqueue_documents(records: Iterable[dict], username: str) -> list[int]:
                     "author": (item.get("author") or "").strip() or None,
                     "source_reference": (item.get("source_reference") or "").strip() or None,
                     "document_date": document_date,
+                    "date_start": date_bounds(document_date)[0],
+                    "date_end": date_bounds(document_date)[1],
                     "original_format": item.get("original_format"),
                     "original_file_path": str(item["original_file_path"]),
                     "ocr_language": item.get("ocr_language") or config.OCR_LANGUAGE,
@@ -404,6 +396,7 @@ def update_document_metadata(
     username: str,
     expected_updated_at: str | None,
     author: str | None = None,
+    physical_location: str | None = None,
 ) -> None:
     normalized_date = normalize_document_date(document_date)
     with get_connection() as conn:
@@ -416,15 +409,21 @@ def update_document_metadata(
             result = conn.execute(text(f'''
                 UPDATE document_records
                 SET title = :title, author = :author, source_reference = :source_reference,
-                    document_date = :document_date, original_format = :original_format,
+                    physical_location = CASE WHEN :set_location THEN :physical_location ELSE physical_location END,
+                    document_date = :document_date, document_date_start = :date_start,
+                    document_date_end = :date_end, original_format = :original_format,
                     ocr_language = :ocr_language,
                     updated_by = :updated_by, updated_at = :updated_at
                 WHERE document_id = :document_id AND {concurrency_clause}
             '''), {
                 "title": (title or "").strip() or None,
                 "author": (author or "").strip() or None,
+                "set_location": physical_location is not None,
+                "physical_location": (physical_location or "").strip() or None,
                 "source_reference": (source_reference or "").strip() or None,
                 "document_date": normalized_date,
+                "date_start": date_bounds(normalized_date)[0],
+                "date_end": date_bounds(normalized_date)[1],
                 "original_format": original_format,
                 "ocr_language": ocr_language or config.OCR_LANGUAGE,
                 "updated_by": username,
@@ -445,7 +444,8 @@ def update_document_metadata(
                 conn, "document_records", document_id, "UPDATE", username,
                 details={
                     "columns": [
-                        "title", "author", "source_reference", "document_date", "original_format", "ocr_language"
+                        "title", "author", "source_reference", "document_date", "original_format", "ocr_language",
+                        *(["physical_location"] if physical_location is not None else []),
                     ]
                 },
             )

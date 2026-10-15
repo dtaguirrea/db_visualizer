@@ -19,15 +19,18 @@ services:
       - db_visualizer_network
 
   ocr_service:
-    image: ${OCR_IMAGE:-ghcr.io/huridocs/pdf-document-layout-analysis:latest}
-    pull_policy: ${OCR_PULL_POLICY:-missing}
+    build:
+      context: .
+      dockerfile: Dockerfile.ocr
+    image: db_visualizer-ocr:languages
+    pull_policy: never
     container_name: db_visualizer_ocr_service
     entrypoint: ["./start.sh"]
     restart: unless-stopped
     networks:
       - db_visualizer_network
-
   app:
+    image: db_visualizer-app:3.1.0
     build:
       context: .
       dockerfile: Dockerfile
@@ -70,6 +73,9 @@ services:
       - db_visualizer_network
 
   ocr_worker:
+    image: db_visualizer-app:3.1.0
+    healthcheck:
+      disable: true
     build:
       context: .
       dockerfile: Dockerfile

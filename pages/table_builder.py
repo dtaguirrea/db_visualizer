@@ -3,7 +3,10 @@ import pandas as pd
 import streamlit as st
 
 import config
-from src.database import get_connection, list_user_tables
+from src.csv_ui import render_csv_import
+from src.column_ui import column_controls, render_add_column
+from src.dynamic_tables import prepare_column
+from src.database import get_connection
 from src.dynamic_tables import (
     InvalidIdentifierError,
     create_dynamic_table,
@@ -18,13 +21,13 @@ st.title("Crear tablas")
 st.session_state.setdefault("new_table_columns", [])
 
 with get_connection() as conn:
-    existing_tables = list_user_tables(conn)
     registry = list_registered_tables(conn)
     dynamic_table_names = [row["table_name"] for row in registry]
-    generic_fk_targets = ["document_records", "extraction_records"] + dynamic_table_names
-    generic_fk_targets = [table for table in generic_fk_targets if table in existing_tables]
 
-    tab_create, tab_manage = st.tabs(["Crear", "Administrar"])
+    tab_create, tab_manage, tab_csv = st.tabs(["Crear", "Administrar", "Crear desde CSV"])
+
+    with tab_csv:
+        render_csv_import(conn, st.session_state.username)
 
     with tab_create:
         col_name, col_desc = st.columns(2)
@@ -33,49 +36,16 @@ with get_connection() as conn:
         with col_desc:
             new_table_description = st.text_input("Descripción", key="new_table_description_input")
 
-        with st.form("add_column_form", clear_on_submit=True):
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                column_name = st.text_input("Campo")
-            with col2:
-                column_type = st.selectbox(
-                    "Tipo",
-                    [
-                        "Texto",
-                        "Número entero",
-                        "Número decimal",
-                        "Fecha",
-                        "Documento",
-                        "Llave foránea",
-                    ],
-                )
-            with col3:
-                fk_target = None
-                if column_type == "Documento":
-                    fk_target = "document_records"
-                    st.text_input("Tabla relacionada", value="Documentos", disabled=True)
-                elif column_type == "Llave foránea":
-                    non_document_targets = [
-                        table for table in generic_fk_targets if table != "document_records"
-                    ]
-                    if non_document_targets:
-                        fk_target = st.selectbox("Tabla relacionada", non_document_targets)
-                    else:
-                        st.text_input("Tabla relacionada", value="No hay tablas disponibles", disabled=True)
-            add = st.form_submit_button("Agregar campo")
-
-        if add:
-            if not column_name.strip():
-                st.error("Ingresa un nombre de campo.")
-            elif column_type == "Llave foránea" and not fk_target:
-                st.error("No hay una tabla disponible para relacionar.")
-            else:
-                st.session_state.new_table_columns.append({
-                    "name": column_name.strip(),
-                    "type": column_type,
-                    "foreign_key_table": fk_target,
-                })
+        column = column_controls(conn, 'create_column')
+        if st.button('Agregar campo'):
+            try:
+                seen = {'record_id', 'created_by', 'created_at', 'updated_by', 'updated_at'} | {c['name'] for c in st.session_state.new_table_columns}
+                _, normalized = prepare_column(conn, column, seen, len(st.session_state.new_table_columns))
+                column['name'] = normalized['name']
+                st.session_state.new_table_columns.append(column)
                 st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
 
         if st.session_state.new_table_columns:
             preview_rows = []
@@ -85,6 +55,7 @@ with get_connection() as conn:
                     "Campo": column["name"],
                     "Tipo": column["type"],
                     "Relación": "Documentos" if related == "document_records" else related,
+                    "Opciones": column.get("options") or "",
                 })
             st.dataframe(pd.DataFrame(preview_rows), use_container_width=True, hide_index=True)
             col_remove, col_clear, _ = st.columns([1, 1, 4])
@@ -121,6 +92,10 @@ with get_connection() as conn:
             st.dataframe(pd.DataFrame(current_registry), use_container_width=True, hide_index=True)
 
     with tab_manage:
+        if dynamic_table_names:
+            selected = st.selectbox("Tabla para agregar columnas", dynamic_table_names)
+            render_add_column(conn, selected, st.session_state.username)
+            st.divider()
         removable = dynamic_table_names
         if not removable:
             st.info("No hay tablas personalizadas para eliminar.")

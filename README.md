@@ -1,516 +1,280 @@
-# db_visualizer
+# db_visualizer 3.1.0
 
-**db_visualizer** es una plataforma colaborativa para gestión documental y estructuración de datos. Permite trabajar con documentos PDF, aplicar OCR, consultar el texto reconocido, organizar información en tablas relacionales y mantener trazabilidad sobre las modificaciones realizadas por los usuarios.
+Plataforma colaborativa de investigación histórica y documental. Interfaz en español,
+con Streamlit, PostgreSQL 17 y OCR HURIDOCS ejecutado por CPU.
 
-**Versión actual:** `2.2.0`
+## Funcionalidades
 
-### Actualización por ZIP a 2.2.0
+- Carga, búsqueda, edición y visualización de PDF; descarga de la copia con OCR.
+- Cola OCR persistente de hasta 20 documentos, procesados secuencialmente.
+- Usuarios, sesiones, auditoría y detección de conflictos al editar registros.
+- Tablas personalizadas, llaves foráneas, campos con opciones y agregado de columnas.
+- Fechas históricas completas o parciales, sin inventar precisión.
+- Importación transaccional y exportación CSV. Importar agrega filas; no deduplica.
+- **Gráficos:** distribuciones, porcentajes, series anuales y rankings por relaciones.
 
-Haz un respaldo de PostgreSQL y los PDFs antes de actualizar. Detén los servicios
-con `docker compose down` (sin `-v`). Extrae el ZIP en una carpeta temporal y copia
-su contenido sobre la carpeta actual del proyecto: no borres ni renombres tu carpeta
-de trabajo, y conserva `.git`, `.env` y cualquier configuración local personalizada.
-El ZIP no contiene historial Git ni secretos. Ejecuta `docker compose up --build -d`.
-La migración agrega `author` opcional sin borrar documentos ni tablas existentes.
+Los datos y PDF se conservan en volúmenes Docker. Detener la app no los borra.
 
-Autor del documento es una persona o institución, no el usuario que subió el PDF.
-Puedes buscar por autor, fechas o ambos sin escribir texto. Estos filtros limitan
-los resultados a documentos y se combinan con el texto mediante AND. Para un día
-exacto, usa la misma fecha en Desde y Hasta; para un año, usa enero 1 a diciembre 31.
-Las fechas representan la fecha del documento/autoría, no la fecha de carga.
-El editor de fechas de tablas admite desde 1800; en Documentos también puedes
-escribir directamente una fecha completa en el selector.
+## Uso diario: iniciar y cerrar
 
-### Diagnóstico de portugués
+Requisitos: Docker Desktop abierto y funcionando, PowerShell y una instalación ya
+configurada en `C:\db_visualizer`.
 
-El cliente envía `pt`, que HURIDOCS traduce a `por` para Tesseract.
-Si falla, ejecuta `docker compose exec ocr_service tesseract --list-langs` y
-`docker compose logs --tail 150 ocr_service ocr_worker`. La lista debe incluir `por`.
-No se cambia automáticamente a otro idioma, ni se afirma que falte el paquete sin
-verificarlo. Comparte el error para distinguir un idioma ausente de un timeout,
-un problema del PDF o del servicio. No borres los volúmenes para solucionar OCR.
-
-La interfaz de usuario está en español. Los identificadores del código y la configuración técnica utilizan nombres en inglés cuando corresponde.
-
-## Funcionalidades principales
-
-- Carga múltiple de hasta 20 documentos PDF en una cola persistente.
-- Procesamiento OCR secuencial, con un único documento activo a la vez.
-- Selección de idioma OCR para cada documento.
-- Administración de documentos con edición y eliminación confirmada.
-- Fechas documentales opcionales desde 1800 hasta la actualidad.
-- Generación de PDFs buscables mediante OCR con [HURIDOCS PDF Document Layout Analysis](https://github.com/huridocs/pdf-document-layout-analysis).
-- Visualización, búsqueda y descarga del PDF procesado con OCR.
-- Conservación separada del documento original y de su copia OCR.
-- Registro de extracciones de información asociadas a documentos.
-- Fichaje de evidencias con página, cita literal, análisis, cruces y estado de revisión.
-- Edición, eliminación, filtrado y exportación CSV de fichas documentales.
-- Creación de tablas personalizadas desde la interfaz.
-- Edición colaborativa de registros mediante PostgreSQL.
-- Eliminación explícita y confirmada de registros en tablas personalizadas.
-- Llaves foráneas entre tablas personalizadas.
-- Llaves foráneas hacia documentos mediante un selector desplegable con título, procedencia y fecha.
-- Apertura directa del documento asociado desde una tabla.
-- Búsqueda global sobre texto OCR, extracciones y tablas creadas por los usuarios.
-- Detección de conflictos cuando dos usuarios intentan modificar simultáneamente un mismo registro.
-- Auditoría de creación, modificación y eliminación de datos.
-- Sesiones autenticadas persistentes entre pestañas del navegador.
-- Ejecución completa mediante Docker Compose.
-
-## Arquitectura
-
-```text
-Navegador
-   |
-   v
-Aplicación Streamlit -----> PostgreSQL <----- Trabajador OCR
-          |                                      |
-          +-----> Volumen persistente de PDFs <--+
-                                                 |
-                                      Servicio OCR HURIDOCS
-```
-
-El entorno Docker contiene cuatro servicios principales:
-
-| Servicio | Función |
-| --- | --- |
-| `app` | Aplicación web desarrollada con Streamlit |
-| `db` | Base de datos PostgreSQL compartida |
-| `ocr_service` | Servicio de OCR proporcionado por HURIDOCS |
-| `ocr_worker` | Consumidor exclusivo de la cola; procesa un PDF a la vez |
-
-PostgreSQL y HURIDOCS permanecen dentro de la red privada de Docker y no publican puertos directamente al host.
-
-## Requerimientos
-
-Para la instalación recomendada con Docker se necesita:
-
-- Docker Engine 20.10 o superior, o una versión actual de Docker Desktop.
-- Docker Compose v2.
-- Navegador web moderno.
-- Aproximadamente 10 GB o más de espacio libre en disco para imágenes, dependencias y modelos de OCR.
-- CPU de varios núcleos recomendada.
-
-El servicio HURIDOCS puede funcionar sin GPU, aunque el procesamiento OCR y de layout puede ser considerablemente más lento. Su documentación indica Docker Desktop 4.25+, Docker Engine 20.10+, Compose 2.0+, un mínimo de 2 GB de RAM y aproximadamente 10 GB de almacenamiento para el servicio y sus modelos. Para `db_visualizer` se recomienda disponer de memoria adicional si varios usuarios procesarán documentos simultáneamente.
-
-## Instalación inicial
-
-### 1. Clonar el repositorio
-
-```bash
-git clone <URL_DEL_REPOSITORIO>
-cd db_visualizer
-```
-
-Si todavía no has publicado el repositorio en GitHub, utiliza la sección [Primera publicación en GitHub](#primera-publicación-en-github).
-
-### 2. Crear el archivo de configuración
-
-Linux/macOS:
-
-```bash
-cp .env.example .env
-```
-
-PowerShell:
+**Iniciar todos los servicios:**
 
 ```powershell
-Copy-Item .env.example .env
-```
-
-Edita `.env` y define, como mínimo:
-
-```env
-POSTGRES_PASSWORD=una-clave-larga-y-aleatoria-para-postgresql
-BOOTSTRAP_ADMIN_PASSWORD=otra-clave-larga-y-aleatoria-para-el-administrador
-```
-
-No utilices la misma contraseña para PostgreSQL y para la cuenta administradora.
-
-El administrador inicial se crea únicamente cuando la tabla de usuarios está vacía. El usuario predeterminado es `admin`, pero puede modificarse mediante `BOOTSTRAP_ADMIN_USERNAME` antes del primer inicio.
-
-Al iniciar sesión por primera vez, el administrador debe cambiar la contraseña inicial. Una vez que existen usuarios en la base de datos, `BOOTSTRAP_ADMIN_PASSWORD` deja de utilizarse.
-
-### 3. Iniciar los servicios
-
-```bash
-docker compose up --build -d
-```
-
-Verifica el estado de los contenedores:
-
-```bash
+Set-Location C:\db_visualizer
+docker compose up -d --no-build
 docker compose ps
 ```
 
-Logs de la aplicación:
-
-```bash
-docker compose logs -f app
-```
-
-Logs del servicio OCR:
-
-```bash
-docker compose logs -f ocr_service
-```
-
-Logs de la cola y del documento que está siendo procesado:
-
-```bash
-docker compose logs -f ocr_worker
-```
-
-### 4. Abrir db_visualizer
-
-En el navegador abre:
-
-```text
-http://localhost:8501
-```
-
-Inicia sesión con el administrador configurado en `.env` y cambia la contraseña inicial cuando la aplicación lo solicite.
-
-
-### Reutilizar una imagen OCR ya descargada
-
-Si el equipo ya tiene localmente una imagen funcional de HURIDOCS y no se desea descargar otra, se puede indicar explícitamente en `.env`. Por ejemplo:
-
-```env
-OCR_IMAGE=ghcr.io/huridocs/pdf-document-layout-analysis:latest
-OCR_PULL_POLICY=never
-```
-
-Con `OCR_PULL_POLICY=never`, Docker utiliza exclusivamente la imagen almacenada en el equipo y falla si esa imagen no existe localmente. Esto es útil en conexiones limitadas; para instalaciones nuevas se recomienda `missing`.
-
-## Actualización desde versiones anteriores
-
-La actualización a `2.1.0` conserva los volúmenes existentes. No es necesario recrear PostgreSQL ni volver a cargar los documentos.
-
-```bash
-git pull
-docker compose up --build -d
-```
-
-Al iniciar, la aplicación agrega las columnas de idioma OCR y página de extracción, y conserva los documentos, fichas y tablas existentes. Los documentos que hayan quedado con estado `pendiente` pasan a la cola automáticamente.
-
-No utilices `docker compose down -v` durante una actualización, ya que `-v` elimina deliberadamente los volúmenes persistentes.
-
-## Trabajo colaborativo en una red local
-
-Por seguridad, la configuración predeterminada publica la aplicación únicamente en `127.0.0.1`.
-
-Para un uso temporal dentro de una LAN confiable, cambia en `docker-compose.yml`:
-
-```yaml
-127.0.0.1:${APP_PORT:-8501}:8501
-```
-
-por:
-
-```yaml
-0.0.0.0:${APP_PORT:-8501}:8501
-```
-
-Reinicia los servicios después del cambio.
-
-Los demás usuarios podrán conectarse usando la dirección IP del computador que ejecuta Docker, por ejemplo:
-
-```text
-http://192.168.1.20:8501
-```
-
-No utilices este modo para exponer la aplicación directamente a Internet.
-
-## Despliegue de producción con HTTPS
-
-El archivo `docker-compose.production.yml` agrega un reverse proxy Caddy. Caddy recibe las conexiones HTTPS y reenvía las solicitudes al contenedor de Streamlit mediante la red privada de Docker.
-
-Antes de publicar la aplicación:
-
-1. Configura un dominio o subdominio apuntando a la IP pública del servidor.
-2. Permite los puertos TCP 80 y 443 en el firewall. UDP 443 puede habilitarse para HTTP/3.
-3. Configura el dominio en `.env`:
-
-```env
-APP_DOMAIN=db.example.org
-```
-
-4. Utiliza contraseñas de producción largas, únicas y aleatorias.
-5. Inicia el entorno:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.production.yml up --build -d
-```
-
-La configuración de producción fuerza cookies de autenticación seguras (`Secure`). Caddy administra automáticamente los certificados TLS cuando el dominio y la red están correctamente configurados.
-
-En un despliegue público no expongas directamente PostgreSQL ni el API de HURIDOCS.
-
-## Variables de entorno
-
-| Variable | Valor predeterminado | Descripción |
-| --- | --- | --- |
-| `POSTGRES_DB` | `db_visualizer` | Nombre de la base PostgreSQL |
-| `POSTGRES_USER` | `db_visualizer` | Usuario de PostgreSQL |
-| `POSTGRES_PASSWORD` | obligatorio | Contraseña de PostgreSQL |
-| `BOOTSTRAP_ADMIN_USERNAME` | `admin` | Usuario administrador inicial |
-| `BOOTSTRAP_ADMIN_FULL_NAME` | `Administrador` | Nombre visible del administrador inicial |
-| `BOOTSTRAP_ADMIN_PASSWORD` | obligatorio | Contraseña inicial del administrador |
-| `APP_PORT` | `8501` | Puerto local de la aplicación |
-| `AUTH_SESSION_DAYS` | `7` | Duración de las sesiones autenticadas |
-| `AUTH_COOKIE_SECURE` | `false` | Requiere HTTPS para la cookie; producción lo fuerza a `true` |
-| `MIN_PASSWORD_LENGTH` | `12` | Largo mínimo permitido para contraseñas |
-| `SEARCH_RESULT_LIMIT` | `100` | Límite de resultados por categoría de búsqueda |
-| `OCR_IMAGE` | `ghcr.io/huridocs/pdf-document-layout-analysis:latest` | Imagen del servicio OCR |
-| `OCR_PULL_POLICY` | `missing` | Política de descarga de la imagen OCR (`missing` o `never`) |
-| `OCR_LANGUAGE` | `es` | Idioma enviado al servicio OCR |
-| `OCR_TIMEOUT_SECONDS` | `600` | Tiempo máximo de una solicitud OCR |
-| `OCR_USE_FAST_MODE` | `false` | Habilita el modo rápido cuando `OCR_TEXT_EXTRACTION_MODE=huridocs` |
-| `OCR_ROTATE_PAGES` | `true` | Permite rotar páginas durante el OCR |
-| `OCR_DESKEW` | `true` | Corrige inclinación de páginas durante el OCR |
-| `OCR_QUEUE_MAX_SIZE` | `20` | Máximo de documentos entre espera y procesamiento |
-| `OCR_WORKER_POLL_SECONDS` | `3` | Intervalo de consulta de la cola cuando está vacía |
-| `OCR_TEXT_EXTRACTION_MODE` | `local` | Indexación desde el PDF (`local`), mediante HURIDOCS (`huridocs`) o desactivada (`disabled`) |
-| `APP_DOMAIN` | sin valor | Dominio utilizado por la configuración HTTPS |
-
-El archivo `.env` contiene secretos y **nunca debe subirse a GitHub**. Está excluido mediante `.gitignore`.
-
-## Persistencia de datos
-
-Docker utiliza volúmenes persistentes para que los datos sobrevivan a reinicios y reconstrucciones:
-
-- `db_visualizer_postgres_data`: base de datos PostgreSQL.
-- `db_visualizer_uploaded_files`: PDFs originales y procesados con OCR.
-- `db_visualizer_caddy_data`: certificados y datos TLS en producción.
-- `db_visualizer_caddy_config`: configuración interna de Caddy en producción.
-
-Detener los contenedores normalmente no elimina información:
-
-```bash
-docker compose down
-docker compose up -d
-```
-
-No ejecutes:
-
-```bash
-docker compose down -v
-```
-
-salvo que quieras eliminar deliberadamente la base de datos y los documentos persistentes.
-
-## Reiniciar desde una instalación vacía
-
-Si todavía no existen datos valiosos y deseas comenzar completamente desde cero:
-
-```bash
-docker compose down -v
-```
-
-Después vuelve a iniciar el entorno:
-
-```bash
-docker compose up --build -d
-```
-
-El comando con `-v` elimina tanto PostgreSQL como los documentos almacenados en los volúmenes de Docker.
-
-## Copias de seguridad
-
-Una copia de seguridad de producción debe incluir **la base de datos y los archivos PDF**.
-
-Para generar un dump SQL de PostgreSQL:
-
-```bash
-docker compose exec -T db sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > db_visualizer.sql
-```
-
-En PowerShell también puedes utilizar directamente los valores definidos en `.env` si el manejo de variables de tu shell es diferente.
-
-Los PDFs deben respaldarse desde el volumen `db_visualizer_uploaded_files` o migrarse a un almacenamiento persistente externo.
-
-Un backup no debe considerarse confiable hasta haber probado su restauración.
-
-## Gestión de usuarios
-
-Los administradores pueden crear usuarios y restablecer contraseñas desde la sección **Cuenta**.
-
-También existe una utilidad de línea de comandos.
-
-Listar usuarios:
-
-```bash
-docker compose exec app python scripts/manage_users.py list
-```
-
-Crear un usuario:
-
-```bash
-docker compose exec app python scripts/manage_users.py add USUARIO "Nombre Completo" investigador CONTRASEÑA_TEMPORAL
-```
-
-Restablecer una contraseña:
-
-```bash
-docker compose exec app python scripts/manage_users.py reset-password USUARIO CONTRASEÑA_TEMPORAL
-```
-
-Las contraseñas temporales deben cumplir el largo mínimo configurado y deben reemplazarse posteriormente.
-
-## Desarrollo y pruebas
-
-La imagen Docker de producción instala únicamente dependencias necesarias en ejecución. Las herramientas de pruebas están separadas en `requirements-dev.txt`.
-
-Crear entorno virtual:
-
-```bash
-python -m venv .venv
-```
-
-Activar en Linux/macOS:
-
-```bash
-source .venv/bin/activate
-```
-
-Activar en PowerShell:
+Abre <http://localhost:8501>. Se espera que `db` y `app` estén `healthy` una vez
+terminado el arranque; `ocr_service` y `ocr_worker` deben estar en ejecución.
+El worker no tiene healthcheck HTTP: no mostrar `healthy` no es un error.
+Si falta una imagen, sigue la instalación inicial o la actualización; no se construye
+una imagen automáticamente con `--no-build`.
+
+**Cerrar tu sesión:** usa **Cerrar sesión** en la barra lateral. Cerrar una pestaña no
+detiene el servidor ni necesariamente cierra la sesión persistente del navegador.
+
+**Detener toda la aplicación:**
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
+Set-Location C:\db_visualizer
+docker compose stop
+docker compose ps -a
 ```
 
-Instalar dependencias:
+Los contenedores deben figurar detenidos (`Exited`). Puedes cerrar Docker Desktop
+después. Los demás investigadores perderán acceso mientras el servidor esté detenido.
+Si se interrumpe un trabajo OCR, el worker lo devolverá a la cola al volver a iniciar.
+Para reanudar, utiliza los mismos comandos de inicio.
 
-```bash
-pip install -r requirements-dev.txt
+**Ver errores:**
+
+```powershell
+docker compose logs --tail 100 app ocr_worker
+docker compose logs --tail 100 ocr_service
 ```
 
-Ejecutar pruebas:
+Si agregas `-f`, `Ctrl+C` deja de seguir los logs; no detiene los servicios.
+No uses `docker compose down -v`: elimina los volúmenes que contienen los datos.
 
-```bash
-pytest -q
+## Primera instalación, solo si no existe una instalación previa
+
+1. Instala Docker Desktop con contenedores Linux y extráe el ZIP en
+   `C:\db_visualizer`. `VERSION` y `docker-compose.yml` deben estar directamente
+   dentro de esa carpeta.
+2. Crea el archivo de configuración **sin sobrescribir uno existente**:
+
+```powershell
+Set-Location C:\db_visualizer
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+notepad .env
 ```
 
-Comprobar sintaxis de los módulos Python:
+Completa `POSTGRES_PASSWORD` y `BOOTSTRAP_ADMIN_PASSWORD` con contraseñas propias.
+La contraseña inicial del administrador debe tener al menos 12 caracteres.
+No publiques `.env`. No cambies la contraseña de PostgreSQL en `.env` como método
+de actualización: cambiar esa variable no cambia la contraseña de una base existente.
 
-```bash
-python -m compileall -q app.py config.py src pages scripts
+3. Construye e inicia:
+
+```powershell
+docker compose build ocr_service app
+if ($LASTEXITCODE -ne 0) { throw 'Falló la construcción; revisa el error antes de continuar.' }
+docker compose run --rm --no-deps --entrypoint python app -c "from pathlib import Path; print(Path('/app/VERSION').read_text())"
+if ($LASTEXITCODE -ne 0) { throw 'No se pudo verificar la imagen.' }
+# Debe mostrar 3.1.0. Si muestra otra versión, no continúes.
+docker compose up -d --no-build
+docker compose ps
 ```
 
-GitHub Actions ejecuta estas comprobaciones automáticamente en los `push` y `pull requests` dirigidos a `main`.
+La primera construcción descarga el motor OCR y puede tardar bastante.
+Entra en <http://localhost:8501> con el administrador definido en `.env` y cambia
+su contraseña cuando se solicite. Desde **Cuenta**, el administrador puede crear usuarios.
 
-## Estructura del repositorio
+## Actualizar una instalación 3.0.0
 
-```text
-db_visualizer/
-├── .github/                    # CI y configuración de pull requests
-├── .streamlit/                 # Configuración de Streamlit
-├── pages/                      # Páginas de la aplicación
-├── scripts/                    # Utilidades administrativas
-├── src/                        # Base de datos, auth, OCR, búsqueda y tablas
-├── tests/                      # Pruebas automatizadas
-├── app.py                      # Punto de entrada de Streamlit
-├── config.py                   # Configuración central
-├── Caddyfile                   # Reverse proxy HTTPS para producción
-├── docker-compose.yml          # Stack principal
-├── docker-compose.production.yml
-├── Dockerfile
-├── requirements.txt            # Dependencias de producción
-├── requirements-dev.txt        # Dependencias de desarrollo/pruebas
-├── VERSION                     # Versión actual
-├── CHANGELOG.md
-├── CONTRIBUTING.md
-├── SECURITY.md
-└── README.md
+No reemplaces `.env`, `.git` ni volúmenes. Conserva el nombre del proyecto Compose
+(`db_visualizer`) para seguir utilizando los mismos volúmenes.
+
+### 1. Respaldo obligatorio, antes de copiar código
+
+Ejecuta los bloques en la misma ventana de PowerShell. Si falla un paso, detente.
+El respaldo contiene información privada y debe guardarse en un lugar protegido.
+
+```powershell
+$ErrorActionPreference = 'Stop'
+Set-Location C:\db_visualizer
+$stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+$backup = "C:\db_visualizer_backups\pre_310_$stamp"
+New-Item -ItemType Directory -Path $backup | Out-Null
+docker compose up -d db
+if ($LASTEXITCODE -ne 0) { throw 'No se pudo iniciar PostgreSQL.' }
+$appId = (docker compose ps -aq app | Select-Object -First 1)
+if (-not $appId) { throw 'No se encuentra el contenedor app para respaldar los PDF.' }
+docker compose stop app ocr_worker
+if ($LASTEXITCODE -ne 0) { throw 'No se pudieron detener los procesos que escriben datos.' }
+docker compose exec -T db sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc -f /tmp/pre_310.dump'
+if ($LASTEXITCODE -ne 0) { throw 'Falló el respaldo de PostgreSQL. No continúes.' }
+docker compose exec -T db pg_restore --list /tmp/pre_310.dump
+if ($LASTEXITCODE -ne 0) { throw 'El respaldo no pudo ser leído por pg_restore.' }
+docker compose cp db:/tmp/pre_310.dump "$backup\database.dump"
+if ($LASTEXITCODE -ne 0) { throw 'No se pudo copiar el respaldo de PostgreSQL.' }
+docker cp "${appId}:/app/uploaded_files" "$backup\uploaded_files"
+if ($LASTEXITCODE -ne 0) { throw 'No se pudieron respaldar los PDF.' }
+Copy-Item -LiteralPath 'C:\db_visualizer' -Destination "$backup\source" -Recurse
+Get-Item "$backup\database.dump"
+Get-ChildItem "$backup\uploaded_files"
+Write-Host "Respaldo guardado en $backup"
 ```
 
-## Flujo de trabajo con Git y GitHub
+`database.dump` debe existir y tener contenido. Revisa que los PDF esperados estén
+en el respaldo. La lectura con `pg_restore --list` comprueba el catálogo del dump;
+no sustituye una prueba de restauración completa. No copies el código nuevo si falla el respaldo.
 
-El nombre oficial del proyecto es **`db_visualizer`**. La primera versión estable del repositorio es **`v1.0.1`**. Las denominaciones internas anteriores utilizadas durante el prototipado no forman parte del versionado oficial.
+### 2. Copiar únicamente el código de la entrega
 
-Modelo de ramas recomendado:
-
-- `main`: código estable y desplegable.
-- `feature/<nombre>`: nuevas funcionalidades.
-- `fix/<nombre>`: correcciones de bugs.
-- `docs/<nombre>`: cambios exclusivamente documentales.
-
-Ejemplo de trabajo diario:
-
-```bash
-git switch main
-git pull
-git switch -c feature/mi-cambio
-# realizar cambios
-git add .
-git commit -m "Add my change"
-git push -u origin feature/mi-cambio
+```powershell
+$zip = "$env:USERPROFILE\Downloads\db_visualizer_3.1.0.zip"
+$stage = "C:\db_visualizer_stage_310_$stamp"
+Expand-Archive -LiteralPath $zip -DestinationPath $stage
+if ((Get-Content "$stage\VERSION" -Raw).Trim() -ne '3.1.0') {
+    throw 'El ZIP no contiene la versión esperada en su raíz.'
+}
+$files = @('app.py', 'config.py', 'VERSION', 'requirements.txt', 'requirements-dev.txt',
+    'Dockerfile', 'Dockerfile.ocr', 'docker-compose.yml', 'docker-compose.production.yml',
+    'Caddyfile', '.dockerignore', '.env.example', 'README.md', 'CHANGELOG.md', 'VALIDATION.md')
+foreach ($file in $files) {
+    Copy-Item -LiteralPath (Join-Path $stage $file) -Destination (Join-Path 'C:\db_visualizer' $file) -Force
+}
+foreach ($folder in @('src', 'pages', 'scripts', 'tests')) {
+    New-Item -ItemType Directory -Path "C:\db_visualizer\$folder" -Force | Out-Null
+    Copy-Item -Path "$stage\$folder\*" -Destination "C:\db_visualizer\$folder" -Recurse -Force
+}
 ```
 
-Luego crea un pull request hacia `main`. La recomendación es fusionarlo únicamente cuando las pruebas de CI hayan terminado correctamente.
+Esta copia conserva los archivos ajenos a la entrega. No copia `.env` ni modifica `.git`.
 
-## Primera publicación en GitHub
+### 3. Construir una vez y verificar la versión antes de arrancar
 
-Crea primero un repositorio vacío llamado `db_visualizer` en GitHub.
-
-Desde esta carpeta ejecuta:
-
-```bash
-git init
-git branch -M main
-git add .
-git commit -m "Release db_visualizer 1.0.0"
-git remote add origin https://github.com/<TU_USUARIO>/db_visualizer.git
-git push -u origin main
+```powershell
+Set-Location C:\db_visualizer
+Get-Content VERSION
+docker compose build app
+if ($LASTEXITCODE -ne 0) { throw 'Falló la construcción.' }
+docker compose run --rm --no-deps --entrypoint python app -c "from pathlib import Path; print(Path('/app/VERSION').read_text())"
+if ($LASTEXITCODE -ne 0) { throw 'No se pudo verificar la imagen.' }
 ```
 
-Después crea el tag del primer release oficial:
+Ambas lecturas deben mostrar **3.1.0**. App y worker comparten la misma imagen;
+no hace falta construirla dos veces. No cambió el motor OCR en esta entrega.
 
-```bash
-git tag -a v1.0.1 -m "db_visualizer 1.0.0"
-git push origin v1.0.1
+Si la versión de la imagen es incorrecta, no repitas builds indiscriminadamente:
+comprueba `docker compose config --services`, `docker compose config --images`,
+el directorio actual y los archivos `COMPOSE_FILE`/overrides que uses. La salida
+completa de `docker compose config` puede contener contraseñas; no la compartas.
+
+Como alternativa al problema de contexto detectado en instalaciones anteriores,
+construye desde un TAR del directorio de preparación, que contiene solo esta entrega:
+
+```powershell
+$buildTar = "C:\db_visualizer_source_310_$stamp.tar"
+tar -cf $buildTar -C $stage .
+if ($LASTEXITCODE -ne 0) { throw 'No se pudo crear el TAR.' }
+cmd.exe /d /c "docker build -t db_visualizer-app:3.1.0 - < `"$buildTar`""
+if ($LASTEXITCODE -ne 0) { throw 'Falló la construcción desde TAR.' }
+docker compose run --rm --no-deps --entrypoint python app -c "from pathlib import Path; print(Path('/app/VERSION').read_text())"
 ```
 
-En GitHub puedes crear un **Release** a partir de ese tag y utilizar el contenido de `CHANGELOG.md` como notas de la versión.
+El envío binario lo hace `cmd.exe`, no una tubería de texto de PowerShell.
+Continúa solo cuando la imagen muestre la versión correcta.
 
-## Versionado
+### 4. Arrancar y comprobar
 
-`db_visualizer` utiliza versionado semántico:
-
-```text
-MAJOR.MINOR.PATCH
+```powershell
+docker compose up -d --no-build
+if ($LASTEXITCODE -ne 0) { throw 'Falló el inicio de los servicios.' }
+docker compose ps
+docker compose exec -T app cat /app/VERSION
+docker compose exec -T ocr_worker cat /app/VERSION
+docker compose logs --tail 80 app ocr_worker
 ```
 
-Ejemplos:
+Ambos contenedores deben mostrar `3.1.0`. Comprueba login, registros, descarga de un
+PDF y **Gráficos**. Contrasta un gráfico con una cuenta manual de pocos registros.
+No borres el respaldo después de estas verificaciones.
 
-- `1.0.1`: corrección compatible de un bug.
-- `1.1.0`: nueva funcionalidad compatible.
-- `2.0.0`: cambio incompatible que puede requerir migración o cambios de uso.
+La migración 3.1.0 recalcula únicamente los límites derivados para buscar fechas
+parciales y registra su ejecución. Conserva las fechas originales. Si vienes de
+una versión anterior a 3.0.0, también se ejecuta la migración heredada que convierte
+columnas de fechas `DATE` a `TEXT`: prueba esa actualización primero sobre una copia
+de la base. Una instalación que ya registró 3.0.0 no repite esa conversión.
 
-En cada release deben actualizarse `VERSION` y `CHANGELOG.md`.
+## Cómo usar los gráficos
 
-## Seguridad
+Abre **Datos → Gráficos**. Las tablas Personas y Organizaciones se eligen por su
+nombre real; no se crean tablas de ejemplo ni se insertan datos al abrir la sección.
 
-- Las contraseñas se almacenan mediante hashes bcrypt.
-- Los tokens de sesión son aleatorios y PostgreSQL conserva únicamente su hash.
-- Los cambios de contraseña revocan sesiones anteriores.
-- PostgreSQL y HURIDOCS se mantienen en la red privada de Docker.
-- La aplicación escucha únicamente en localhost por defecto.
-- El despliegue HTTPS utiliza cookies `Secure`.
-- PDFs, archivos OCR, `.env` y dumps de base de datos están excluidos de Git.
-- El contenedor de la aplicación se ejecuta con un usuario sin privilegios de root.
+| Vista | Uso |
+| --- | --- |
+| Explorar tablas | Elige tabla y columna; muestra cantidades, porcentajes, barras, circular o tabla. |
+| Porcentaje destacado | Selecciona una o varias categorías, por ejemplo `Mujer` y `Femenino`. |
+| Filtro opcional | Limita el análisis a un valor de otra columna, por ejemplo nacionalidad Chile. |
+| Fechas | Agrupa por año conocido; informa cuántos registros no tienen fecha, año o fecha válida. |
+| Documentos | Año, autor, procedencia, formato, idioma configurado para OCR y estado de procesamiento. |
+| Relaciones | Ranking por una FK real. Puede contar filas o IDs distintos de otra FK de la tabla intermedia. |
 
-Consulta [SECURITY.md](SECURITY.md) antes de publicar la aplicación en Internet.
+El porcentaje usa todos los registros seleccionados o solo los que tienen valor,
+según la casilla **Incluir registros sin información**. El denominador se muestra
+siempre. Los espacios externos y los vacíos se normalizan para el análisis, sin
+cambiar la base; no se fusionan automáticamente variantes como `Mujer` y `mujer`.
+`F` no se interpreta automáticamente como mujer: selecciona explícitamente el valor
+que corresponda. Las primeras categorías pueden agruparse con el resto en
+**Otras categorías (agrupadas)**, conservando el total. El CSV conserva todo el resumen.
 
-## Dependencia OCR
+### Ideas que puedes realizar con esta versión
 
-`db_visualizer` utiliza HURIDOCS `pdf-document-layout-analysis` para realizar OCR. La imagen se controla con `OCR_IMAGE`; la configuración incluida utiliza `ghcr.io/huridocs/pdf-document-layout-analysis:latest` y permite fijar otra versión desde `.env`.
+| Pregunta | Tabla/columna o relación necesaria | Presentación sugerida |
+| --- | --- | --- |
+| ¿Qué porcentaje de personas son mujeres? | Personas → género; seleccionar categorías pertinentes | Indicador y circular |
+| ¿Qué nacionalidades predominan? | Personas → nacionalidad | Barras |
+| ¿Qué profesiones o roles aparecen más? | Personas → profesión o rol | Barras |
+| ¿Dónde están las organizaciones? | Organizaciones → país o ciudad | Barras |
+| ¿Qué tipos de organización predominan? | Organizaciones → tipo/categoría | Barras o circular |
+| ¿Cómo se distribuye el archivo en el tiempo? | Documentos → fecha | Barras por año |
+| ¿Cuántos documentos faltan por procesar? | Documentos → estado OCR | Barras |
+| ¿Qué documento tiene más personas vinculadas? | Personas → documento, o tabla intermedia Persona–Documento | Ranking; IDs distintos si hay tabla intermedia |
+| ¿Qué organizaciones tienen más documentos? | Tabla intermedia Organización–Documento | Ranking de documentos distintos por organización |
 
-Proyecto original:
+Las relaciones dependen de las FK existentes. Un vínculo a un documento no demuestra
+por sí solo que la persona esté mencionada: puede indicar autoría u otro rol.
+El ranking muestra exactamente la relación seleccionada, sin interpretar su significado.
+Los porcentajes describen los registros de la base, no una población histórica completa.
 
-https://github.com/huridocs/pdf-document-layout-analysis
+Cruces de dos categorías (género por nacionalidad), mapas y redes quedan como ideas
+para una entrega posterior. La vista actual permite filtrar una categoría a la vez.
 
-## Licencia
+## OCR y acceso remoto
 
-Esta versión de `db_visualizer` no incluye todavía una licencia propia. Antes de publicar el código como proyecto open source, agrega un archivo `LICENSE` con los términos que quieras aplicar. Las dependencias y servicios de terceros mantienen sus respectivas licencias.
+Se mantiene `/ocr` más extracción local con `pypdf`; `/text` no se activa por defecto.
+La variable `OCR_TEXT_EXTRACTION_MODE=local` conserva ese comportamiento.
+`ocr_language` es el idioma solicitado al motor, no el idioma detectado del documento.
+
+Con Tailscale Serve ya configurado, el equipo puede entrar por la dirección habitual
+del servidor mientras el computador y los servicios estén encendidos. `localhost`
+solo funciona en el computador servidor. Esta entrega no modifica Tailscale.
+
+## Pruebas para desarrollo (opcionales)
+
+En una terminal con Python 3.11 o superior, desde la raíz del proyecto:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+Las pruebas utilizan SQLite temporal y datos sintéticos. No apuntan a la base de
+producción. Consulta `VALIDATION.md` para los resultados y límites de esta entrega.

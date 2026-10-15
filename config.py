@@ -62,22 +62,12 @@ AUTH_COOKIE_SECURE = os.environ.get("AUTH_COOKIE_SECURE", "false").lower() == "t
 SEARCH_RESULT_LIMIT = max(10, int(os.environ.get("SEARCH_RESULT_LIMIT", "100")))
 MIN_PASSWORD_LENGTH = max(12, int(os.environ.get("MIN_PASSWORD_LENGTH", "12")))
 
-ELEMENT_CATEGORIES = [
-    "Hardware",
-    "Software",
-    "Procesos tecnológicos",
-    "Personas-redes",
-    "Organizaciones",
-    "Hitos",
-    "Sistemas estadísticos",
-    "Discursos",
-]
-
 ROLE_ADMIN = "admin"
 ROLE_RESEARCHER = "investigador"
 VALID_ROLES = (ROLE_ADMIN, ROLE_RESEARCHER)
 
 PROTECTED_TABLES = {
+    "schema_migrations",
     "users",
     "auth_sessions",
     "document_records",
